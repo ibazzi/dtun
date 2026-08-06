@@ -1,0 +1,14 @@
+Source: dtun
+Section: net
+Priority: optional
+Maintainer: dtun maintainer <info@dtun.local>
+Build-Depends: debhelper-compat (= 13), gcc, libssl-dev, make
+Standards-Version: 4.6.2
+Homepage: https://github.com/dtun/dtun
+
+Package: dtun
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Dual transport authenticated L3 tunnel daemon and kernel module
+ dtun provides authenticated layer-3 mesh tunnels over dual UDP/Raw transports.
+ Includes the dtun kernel module, control utilities, and background daemon.

@@ -1,0 +1,53 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --without dwz,strip
+
+override_dh_testroot:
+
+override_dh_auto_build:
+	make all
+
+override_dh_auto_test:
+	make check
+
+override_dh_auto_install:
+	mkdir -p debian/dtun/usr/bin
+	mkdir -p debian/dtun/lib/modules/$(shell uname -r)/extra
+	mkdir -p debian/dtun/etc/dtun
+	mkdir -p debian/dtun/lib/systemd/system
+	cp -f build/dtund debian/dtun/usr/bin/
+	cp -f build/dtunctl debian/dtun/usr/bin/
+	cp -f build/dtun.ko debian/dtun/lib/modules/$(shell uname -r)/extra/
+	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun-example.conf
+	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun.conf
+	cp -f debian/dtund.service debian/dtun/lib/systemd/system/dtund.service
+
+override_dh_fixperms:
+	chmod -R a+rX debian/dtun
+	chmod 0755 debian/dtun/usr/bin/*
+
+override_dh_dwz:
+
+override_dh_strip:
+
+override_dh_installdeb:
+	mkdir -p debian/dtun/DEBIAN
+	cp -f debian/postinst debian/dtun/DEBIAN/postinst
+	cp -f debian/postrm debian/dtun/DEBIAN/postrm
+	chmod 0755 debian/dtun/DEBIAN/postinst debian/dtun/DEBIAN/postrm
+	chmod -R a+rX debian/dtun
+
+override_dh_gencontrol:
+	dpkg-gencontrol -pdtun -Pdebian/dtun
+
+override_dh_md5sums:
+	(cd debian/dtun && find . -type f ! -path './DEBIAN/*' -print0 | xargs -r0 md5sum > DEBIAN/md5sums)
+
+override_dh_builddeb:
+	@mkdir -p build
+	dpkg-deb --build debian/dtun build/
+
+override_dh_auto_clean:
+	make clean || true
+	rm -rf debian/dtun debian/.debhelper debian/files debian/*.debhelper.log debian/*.substvars

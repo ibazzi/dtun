@@ -1,3 +1,4 @@
+.PHONY: all build modules ctools clean check test p2mp-test deb
 obj-m += dtun.o
 dtun-y := src/dtun_main.o src/dtun_netlink.o
 
@@ -6,8 +7,10 @@ IP ?= $(CURDIR)/bin/ip
 KDIRS ?= $(KDIR)
 SUDO ?= sudo
 CC ?= gcc
-CFLAGS ?= -Wall -Wextra -O2 -Isrc/ctl
-LDFLAGS ?= -lcrypto
+CFLAGS ?= -Wall -Wextra -O2
+override CFLAGS += -Isrc/ctl
+LDFLAGS ?=
+override LDFLAGS += -lcrypto
 
 BUILD_DIR = build
 CTL_OBJS = $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o
@@ -54,7 +57,7 @@ check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state
 		tests/cdaemon/05-real-internet.sh tests/cdaemon/run-all.sh
 
 deb: all
-	@sh package/build-deb.sh
+	./debian/rules binary
 
 compat-build:
 	@set -eu; for kdir in $(KDIRS); do \

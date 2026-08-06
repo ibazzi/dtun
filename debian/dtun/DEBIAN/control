@@ -1,0 +1,11 @@
+Package: dtun
+Version: 1.0.0-1
+Architecture: amd64
+Maintainer: dtun maintainer <info@dtun.local>
+Installed-Size: 1218
+Section: net
+Priority: optional
+Homepage: https://github.com/dtun/dtun
+Description: Dual transport authenticated L3 tunnel daemon and kernel module
+ dtun provides authenticated layer-3 mesh tunnels over dual UDP/Raw transports.
+ Includes the dtun kernel module, control utilities, and background daemon.
