@@ -12,7 +12,7 @@ elif [ "$ARCH" = "aarch64" ]; then
 fi
 
 PKG_DIR="build/pkg/dtun_${VERSION}_${ARCH}"
-DEB_FILE="bin/dtun_${VERSION}_${ARCH}.deb"
+DEB_FILE="build/dtun_${VERSION}_${ARCH}.deb"
 
 echo "[dtun deb] Building package for Architecture=${ARCH}, Kernel=${KVER}..."
 
@@ -23,9 +23,9 @@ mkdir -p "${PKG_DIR}/etc/dtun"
 mkdir -p "${PKG_DIR}/lib/systemd/system"
 mkdir -p "${PKG_DIR}/DEBIAN"
 
-cp -f bin/dtund "${PKG_DIR}/usr/bin/"
-cp -f bin/dtunctl "${PKG_DIR}/usr/bin/"
-cp -f dtun.ko "${PKG_DIR}/lib/modules/${KVER}/extra/"
+cp -f build/dtund "${PKG_DIR}/usr/bin/"
+cp -f build/dtunctl "${PKG_DIR}/usr/bin/"
+cp -f build/dtun.ko "${PKG_DIR}/lib/modules/${KVER}/extra/"
 cp -f samples/dtun-example.conf "${PKG_DIR}/etc/dtun/dtun-example.conf"
 if [ ! -f "${PKG_DIR}/etc/dtun/dtun.conf" ]; then
     cp -f samples/dtun-example.conf "${PKG_DIR}/etc/dtun/dtun.conf"

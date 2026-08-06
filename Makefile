@@ -9,46 +9,52 @@ CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2 -Isrc/ctl
 LDFLAGS ?= -lcrypto
 
-CTL_OBJS = src/ctl/ini_parser.o src/ctl/dtun_proto.o src/ctl/dtun_netlink.o
+BUILD_DIR = build
+CTL_OBJS = $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o
 
 all: modules ctools
 
 modules:
+	@mkdir -p $(BUILD_DIR)
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
+	cp -f dtun.ko $(BUILD_DIR)/dtun.ko
 
-ctools: bin/dtund bin/dtunctl
+ctools: $(BUILD_DIR)/dtund $(BUILD_DIR)/dtunctl
 
-src/ctl/%.o: src/ctl/%.c
+$(BUILD_DIR)/ctl/%.o: src/ctl/%.c
+	@mkdir -p $(BUILD_DIR)/ctl
 	$(CC) $(CFLAGS) -c $< -o $@
 
-bin/dtund: tools/dtund.c $(CTL_OBJS)
-	@mkdir -p bin
+$(BUILD_DIR)/dtund: tools/dtund.c $(CTL_OBJS)
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(CTL_OBJS) $(LDFLAGS) -o $@
 
-bin/dtunctl: tools/dtunctl.c $(CTL_OBJS)
-	@mkdir -p bin
+$(BUILD_DIR)/dtunctl: tools/dtunctl.c $(CTL_OBJS)
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(CTL_OBJS) $(LDFLAGS) -o $@
 
-tests/test_proto: tests/test_proto.c src/ctl/dtun_proto.o
-	$(CC) $(CFLAGS) $< src/ctl/dtun_proto.o $(LDFLAGS) -o $@
+$(BUILD_DIR)/test_proto: tests/test_proto.c $(BUILD_DIR)/ctl/dtun_proto.o
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_proto.o $(LDFLAGS) -o $@
 
-tests/test_daemon_state: tests/test_daemon_state.c tools/dtund.c $(CTL_OBJS)
+$(BUILD_DIR)/test_daemon_state: tests/test_daemon_state.c tools/dtund.c $(CTL_OBJS)
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(CTL_OBJS) $(LDFLAGS) -o $@
-
-deb: all
-	@sh package/build-deb.sh
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	rm -rf src/ctl/*.o bin/dtund bin/dtunctl tests/test_proto tests/test_daemon_state build/pkg
+	rm -rf $(BUILD_DIR)
 
-check: ctools tests/test_proto tests/test_daemon_state
-	./tests/test_proto
-	./tests/test_daemon_state
+check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state
+	./$(BUILD_DIR)/test_proto
+	./$(BUILD_DIR)/test_daemon_state
 	sh -n tests/netns-smoke.sh tests/p2mp-netns.sh tests/cdaemon/lib.sh
 	bash -n tests/cdaemon/01-control-plane.sh tests/cdaemon/02-data-plane.sh \
 		tests/cdaemon/03-stability.sh tests/cdaemon/04-perf.sh \
 		tests/cdaemon/05-real-internet.sh tests/cdaemon/run-all.sh
+
+deb: all
+	@sh package/build-deb.sh
 
 compat-build:
 	@set -eu; for kdir in $(KDIRS); do \

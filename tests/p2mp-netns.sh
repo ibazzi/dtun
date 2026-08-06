@@ -4,8 +4,8 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 IP=${IP:-"$ROOT/bin/ip"}
-DUND=${DUND:-"$ROOT/bin/dtund"}
-CTL=${CTL:-"$ROOT/bin/dtunctl"}
+DUND=${DUND:-"$ROOT/build/dtund"}
+CTL=${CTL:-"$ROOT/build/dtunctl"}
 MULTICAST=${MULTICAST:-"$ROOT/tests/multicast.py"}
 KEY=${KEY:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}
 PREFIX=dtunp2
@@ -45,7 +45,7 @@ trap cleanup EXIT INT TERM
 cleanup
 mkdir -p "$OUT"
 if ! lsmod | grep -q '^dtun '; then
-	modprobe dtun 2>/dev/null || insmod "$ROOT/dtun.ko"
+	modprobe dtun 2>/dev/null || insmod "$ROOT/build/dtun.ko" 2>/dev/null || insmod "$ROOT/dtun.ko"
 fi
 
 ip link add "$BR" type bridge

@@ -449,7 +449,7 @@ int dtun_module_ensure_loaded(void) {
 
     int ret = system("modprobe dtun 2>/dev/null");
     if (ret != 0 || access("/sys/module/dtun", F_OK) != 0) {
-        ret = system("insmod ./dtun.ko 2>/dev/null || insmod ./bin/dtun.ko 2>/dev/null"); (void)ret;
+        ret = system("insmod ./build/dtun.ko 2>/dev/null || insmod ./dtun.ko 2>/dev/null"); (void)ret;
     }
 
     if (access("/sys/module/dtun", F_OK) == 0) {

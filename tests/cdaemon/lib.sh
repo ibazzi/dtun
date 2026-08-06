@@ -4,8 +4,8 @@ set -eu
 
 ROOT=${ROOT:-/home/xu/dev/dtun}
 IP=${IP:-"$ROOT/bin/ip"}
-CTL=${CTL:-"$ROOT/bin/dtunctl"}
-DUND=${DUND:-"$ROOT/bin/dtund"}
+CTL=${CTL:-"$ROOT/build/dtunctl"}
+DUND=${DUND:-"$ROOT/build/dtund"}
 KEY=${KEY:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}
 OUT=${OUT:-/tmp/dtun-test}
 mkdir -p "$OUT" 2>/dev/null || true
@@ -37,7 +37,7 @@ summary() {
 
 mod_up() {
 	if ! lsmod | grep -q '^dtun '; then
-		insmod "$ROOT/dtun.ko"
+		insmod "$ROOT/build/dtun.ko" 2>/dev/null || insmod "$ROOT/dtun.ko"
 	fi
 }
 
