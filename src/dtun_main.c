@@ -11,6 +11,7 @@
 #include <linux/skbuff.h>
 #include <linux/sockptr.h>
 #include <linux/udp.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
 #include <net/ip.h>
 #include <net/ip_tunnels.h>
@@ -521,8 +522,13 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 			err = -EADDRNOTAVAIL;
 			goto out_free;
 		}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+		iptunnel_xmit(NULL, rt, skb, source, addr, DTUN_IPPROTO,
+			      0, IPDEFTTL, 0, false, 0);
+#else
 		iptunnel_xmit(NULL, rt, skb, source, addr, DTUN_IPPROTO,
 			      0, IPDEFTTL, 0, false);
+#endif
 	} else {
 		struct udphdr *udp;
 
@@ -752,11 +758,20 @@ reschedule:
 	schedule_delayed_work(&d->probe_work, DTUN_PROBE_INTERVAL);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+static int dtun_newlink(struct net_device *dev,
+			struct rtnl_newlink_params *params,
+			struct netlink_ext_ack *extack)
+#else
 static int dtun_newlink(struct net *net, struct net_device *dev,
 			struct nlattr *tb[], struct nlattr *data[],
 			struct netlink_ext_ack *extack)
+#endif
 {
 	struct dtun_dev *d = netdev_priv(dev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+	struct nlattr **data = params->data;
+#endif
 	int err;
 
 	if (!data || !data[IFLA_DTUN_LOCAL] || !data[IFLA_DTUN_UDP_PORT] ||
