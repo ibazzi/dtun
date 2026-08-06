@@ -1,5 +1,0 @@
-dtun (1.0.0-1) unstable; urgency=medium
-
-  * Initial release of standard Debian package for dtun.
-
- -- dtun maintainer <info@dtun.local>  Thu, 06 Aug 2026 21:35:00 +0800

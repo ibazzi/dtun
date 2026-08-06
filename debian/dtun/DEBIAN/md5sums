@@ -1,8 +1,0 @@
-b8a6c906cb0736c3b05f17c55d2d247d  ./usr/share/doc/dtun/copyright
-4e241113a891a47a09efed3299ed093f  ./usr/share/doc/dtun/changelog.Debian.gz
-9f63f0016e2539957e5136cc4b1b2ece  ./usr/bin/dtunctl
-b44f899ed39a2d3588dd4dc8d052e8be  ./usr/bin/dtund
-971b1cd3fcc14e69eebdfb50cc985937  ./lib/modules/6.8.0-136-generic/extra/dtun.ko
-e541312d5dcb5f5d44aeb30ff5ee6c2c  ./lib/systemd/system/dtund.service
-0848cf1f9e9357842cbbedc409fd14e0  ./etc/dtun/dtun-example.conf
-0848cf1f9e9357842cbbedc409fd14e0  ./etc/dtun/dtun.conf
