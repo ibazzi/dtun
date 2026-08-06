@@ -23,3 +23,12 @@ iperf_output.txt
 # Debian package build outputs
 /bin/*.deb
 /build/
+
+# Debian build working directory
+/debian/dtun/
+/debian/.debhelper/
+/debian/files
+/debian/debhelper-build-stamp
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/*.debhelper
