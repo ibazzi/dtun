@@ -35,9 +35,12 @@ tests/test_proto: tests/test_proto.c src/ctl/dtun_proto.o
 tests/test_daemon_state: tests/test_daemon_state.c tools/dtund.c $(CTL_OBJS)
 	$(CC) $(CFLAGS) $< $(CTL_OBJS) $(LDFLAGS) -o $@
 
+deb: all
+	@sh package/build-deb.sh
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	rm -f src/ctl/*.o bin/dtund bin/dtunctl tests/test_proto tests/test_daemon_state
+	rm -rf src/ctl/*.o bin/dtund bin/dtunctl tests/test_proto tests/test_daemon_state build/pkg
 
 check: ctools tests/test_proto tests/test_daemon_state
 	./tests/test_proto

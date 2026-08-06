@@ -759,6 +759,8 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     if (hub_load_state(config->state_file) < 0 ||
         hub_validate_state(config, inner_address) < 0)
         return 1;
+    if (dtun_module_ensure_loaded() < 0)
+        return 1;
     created_ifindex = dtun_link_create(config->interface, outer_address,
                                        data_port,
                                        config->node_id ? config->node_id : 1,
@@ -889,10 +891,12 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     }
     close(sock);
     dtun_link_delete_by_name(config->interface);
+    dtun_module_unload_if_needed();
     return 0;
 
 fail_link:
     dtun_link_delete_by_name(config->interface);
+    dtun_module_unload_if_needed();
     return 1;
 }
 
@@ -1010,6 +1014,9 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     timeout.tv_sec = config->timeout > 0 ? config->timeout : 5;
     timeout.tv_usec = 0;
     (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    if (dtun_module_ensure_loaded() < 0)
+        return 1;
+
     printf("[dtund] Spoke registering with %s:%d every %ds (DTRG v%d)\n",
            config->hub_address, config->hub_port, config->interval,
            DTRG_VERSION);
@@ -1169,8 +1176,10 @@ attempt_done:
 
 out:
     if (sock >= 0) close(sock);
-    if (ifindex && !(config->once && registered_once))
+    if (ifindex && !(config->once && registered_once)) {
         dtun_link_delete_by_name(config->interface);
+        dtun_module_unload_if_needed();
+    }
     return result;
 }
 

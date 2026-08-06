@@ -52,6 +52,10 @@ int dtun_nl_peer_set(const dtun_nl_peer_info_t *peer);
 int dtun_nl_peer_del(uint32_t ifindex, uint32_t tunnel_id);
 int dtun_nl_peer_get(uint32_t ifindex, uint32_t tunnel_id, dtun_nl_peer_status_t *status);
 
+/* Kernel module management functions */
+int dtun_module_ensure_loaded(void);
+void dtun_module_unload_if_needed(void);
+
 /* Netlink route commands */
 int dtun_nl_route_add(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefix, uint8_t prefix_len);
 int dtun_nl_route_del(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefix, uint8_t prefix_len);

@@ -438,3 +438,40 @@ int dtun_nl_route_del(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefi
 
     return genl_request(dtun_genl_family_id, DTUN_CMD_ROUTE_DEL, attrs, off, NULL, NULL);
 }
+
+int dtun_module_ensure_loaded(void) {
+    if (access("/sys/module/dtun", F_OK) == 0) {
+        return 0;
+    }
+
+    printf("[dtund] Kernel module 'dtun' is not loaded, attempting to load...\n");
+    fflush(stdout);
+
+    int ret = system("modprobe dtun 2>/dev/null");
+    if (ret != 0 || access("/sys/module/dtun", F_OK) != 0) {
+        ret = system("insmod ./dtun.ko 2>/dev/null || insmod ./bin/dtun.ko 2>/dev/null"); (void)ret;
+    }
+
+    if (access("/sys/module/dtun", F_OK) == 0) {
+        printf("[dtund] Kernel module 'dtun' loaded successfully.\n");
+        fflush(stdout);
+        return 0;
+    }
+
+    fprintf(stderr, "[dtund] Error: Failed to load kernel module 'dtun'. Please ensure dtun.ko is installed or present.\n");
+    return -1;
+}
+
+void dtun_module_unload_if_needed(void) {
+    if (access("/sys/module/dtun", F_OK) != 0) {
+        return;
+    }
+
+    printf("[dtund] Unloading kernel module 'dtun'...\n");
+    fflush(stdout);
+
+    int ret = system("modprobe -r dtun 2>/dev/null");
+    if (ret != 0) {
+        ret = system("rmmod dtun 2>/dev/null"); (void)ret;
+    }
+}

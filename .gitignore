@@ -19,3 +19,7 @@ __pycache__/
 *.log
 *.out
 iperf_output.txt
+
+# Debian package build outputs
+/bin/*.deb
+/build/
