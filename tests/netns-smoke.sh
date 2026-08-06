@@ -48,8 +48,10 @@ $IP -n dtun-b link set lo up
 $IP -n dtun-a link set da up
 $IP -n dtun-b link set db up
 
-$IP netns exec dtun-a $IP link add dtun0 type dtun local 172.31.0.1 udp_port 49000 node_id 1
-$IP netns exec dtun-b $IP link add dtun0 type dtun local 172.31.0.2 udp_port 49000 node_id 2
+# A zero local address must use the source selected by the outer route.  This
+# is the daemon default and keeps simple configurations interface-independent.
+$IP netns exec dtun-a $IP link add dtun0 type dtun local 0.0.0.0 udp_port 49000 node_id 1
+$IP netns exec dtun-b $IP link add dtun0 type dtun local 0.0.0.0 udp_port 49000 node_id 2
 $IP -n dtun-a addr add 10.20.0.1/24 dev dtun0
 $IP -n dtun-b addr add 10.20.0.2/24 dev dtun0
 $IP -n dtun-a link set dtun0 up

@@ -70,7 +70,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | --- | --- | --- |
 | `mode` | 无 | 必填，`hub` 或 `spoke`；也可由 `--mode` 覆盖 |
 | `interface` | `dtun0` | daemon 创建和管理的接口名 |
-| `local_outer_ip` | `0.0.0.0` | 本机外层 IPv4；实际部署应显式填写 |
+| `local_outer_ip` | `0.0.0.0` | 本机外层 IPv4；为 0 时按每条外层路由自动选择源地址 |
 | `data_port` | `49000` | 本地数据面 UDP 端口 |
 | `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
 | `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
@@ -85,6 +85,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `pool` | `10.99.0.0/24` | Spoke 内层地址池，当前只接受 `/0` 至 `/30` |
 | `state_file` | `/var/lib/dtun/hub.state` | 带版本的二进制持久化状态 |
 | `cookie_seconds` | `30` | cookie 时间桶秒数；非正数回退为 30 |
+| `peer_timeout` | `60` | 最后一次成功注册后保留 Spoke 的秒数；非正数回退为 60 |
 
 ### `[spoke]`
 
@@ -202,6 +203,12 @@ Hub 仅在 `peer-get` 显示另一个 Spoke 的认证 UDP 候选为有效时，�
 `SYNC`。接收方为其安装独立双向 tunnel ID 和 `/32`；后续有效 SYNC 中消失的项会
 被删除。周期注册让老节点最终获得新节点信息。
 
+Hub 每秒检查一次注册租约。Spoke 超过 `peer_timeout` 未完成有效注册时，Hub 删除其
+内核 peer、持久化节点和所有相关直连 session；仍在线的其他 Spoke 会在下一次周期
+注册返回的 SYNC 中发现该节点消失并删除直连 peer。通常清理传播时间不超过
+`peer_timeout + interval`，应把 `peer_timeout` 配置为明显大于 Spoke 的 `interval`
+（建议至少三倍），避免短暂抖动导致误回收。
+
 内核发送路径的实际顺序是：
 
 ```text
@@ -211,6 +218,15 @@ Hub 仅在 `peer-get` 显示另一个 Spoke 的认证 UDP 候选为有效时，�
 `udp_up` 是观测状态，当前不作为 UDP 发送门槛。接口的 `hub`/`hub_port` 只是当 peer
 没有 UDP 端点时替换发送目的地址；它不会重写目标 node/tunnel ID，因此不是通用的
 spoke 间外层 relay。spoke 间可靠回退应使用上述 Hub 内层 IPv4 转发路径。
+
+IPv4 组播包会由发送节点复制到接口上的所有 peer，不需要为 `224.0.0.0/4` 配置 peer
+前缀。内核当前不跟踪 IGMP 成员关系，所以所有已配置 peer 都会收到副本；节点较多或
+组播流量较大时，需要把这种全量复制产生的外层带宽计入容量规划。应用仍需按常规方式
+加入组播组，并确保本机路由把目标组播地址导向 dtun 接口，例如：
+
+```sh
+sudo ip route add 239.192.0.0/16 dev dtun0
+```
 
 ## 8. 运维与排障
 

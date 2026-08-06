@@ -25,6 +25,7 @@ int main(void)
     int result = 0;
 
     dtun_config_init(&config);
+    STATE_CHECK(config.peer_timeout == 60);
     STATE_CHECK(inet_pton(AF_INET, "10.99.0.1", &hub) == 1);
     STATE_CHECK(inet_pton(AF_INET, "10.99.0.2", &requested) == 1);
     hub_state_init();
@@ -80,6 +81,17 @@ int main(void)
     STATE_CHECK(g_hub_state.node_count == 2 &&
                 g_hub_state.session_count == 0 &&
                 g_hub_state.nodes[0].tunnel_id == saved_tunnel);
+    STATE_CHECK(hub_session(g_hub_state.nodes[0].node_id,
+                            g_hub_state.nodes[1].node_id) != NULL);
+    STATE_CHECK(g_hub_state.session_count == 1);
+    g_hub_state.nodes[0].last_seen = 100;
+    STATE_CHECK(!hub_node_expired(&g_hub_state.nodes[0], 160, 60));
+    STATE_CHECK(hub_node_expired(&g_hub_state.nodes[0], 161, 60));
+    STATE_CHECK(hub_node_expired(&g_hub_state.nodes[1], 100, 60));
+    hub_remove_node_at(1);
+    STATE_CHECK(g_hub_state.node_count == 1 &&
+                g_hub_state.session_count == 0 &&
+                g_hub_state.nodes[0].node_id == 2);
 
     file = fopen(path, "wb");
     STATE_CHECK(file != NULL);

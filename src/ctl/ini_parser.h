@@ -18,6 +18,7 @@ typedef struct {
     char *pool;             /* e.g., "10.99.0.0/24" */
     char *state_file;       /* default "/var/lib/dtun/hub.state" */
     int cookie_seconds;     /* default 30 */
+    int peer_timeout;       /* registration lease timeout, default 60 */
 
     /* Spoke-specific settings */
     char *hub_address;      /* Hub IP address */

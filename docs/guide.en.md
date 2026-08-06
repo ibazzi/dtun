@@ -82,7 +82,7 @@ name; the section assignments below are conventions for supported configs.
 | --- | --- | --- |
 | `mode` | none | Required: `hub` or `spoke`; `--mode` can override it |
 | `interface` | `dtun0` | Interface created and managed by the daemon |
-| `local_outer_ip` | `0.0.0.0` | Local outer IPv4; set it explicitly in real deployments |
+| `local_outer_ip` | `0.0.0.0` | Local outer IPv4; zero selects the source from each outer route |
 | `data_port` | `49000` | Local data-plane UDP port |
 | `node_id` | `0` | A Hub must use 1 (0 falls back to 1); on a Spoke, 0 requests temporary allocation and 1 is reserved |
 | `address` | `0.0.0.0/24` | Inner IPv4/CIDR; a zero Spoke address requests pool allocation |
@@ -97,6 +97,7 @@ name; the section assignments below are conventions for supported configs.
 | `pool` | `10.99.0.0/24` | Spoke inner-address pool; `/0` through `/30` are accepted |
 | `state_file` | `/var/lib/dtun/hub.state` | Versioned binary persistent state |
 | `cookie_seconds` | `30` | Cookie time-bucket duration; nonpositive values fall back to 30 |
+| `peer_timeout` | `60` | Seconds to retain a Spoke after its last successful registration; nonpositive values fall back to 60 |
 
 ### `[spoke]`
 
@@ -232,6 +233,15 @@ the peer's distinct bidirectional tunnel IDs and `/32`. Entries absent from a
 later valid SYNC are removed, and periodic registration eventually informs old
 nodes about new ones.
 
+The Hub checks registration leases once per second. When a Spoke has not
+completed a valid registration for `peer_timeout` seconds, the Hub removes its
+kernel peer, persistent node, and every related direct session. Other online
+Spokes learn that it disappeared from the SYNC returned by their next periodic
+registration and remove their direct peers. Propagation normally takes no more
+than `peer_timeout + interval`. Configure `peer_timeout` comfortably above the
+Spoke `interval` (at least three times larger is recommended) to tolerate brief
+network disruption.
+
 The kernel's actual transmit order is:
 
 ```text
@@ -244,6 +254,17 @@ no UDP endpoint; they do not rewrite the destination node or tunnel ID. They are
 therefore not a general outer relay between Spokes. Reliable indirect
 Spoke-to-Spoke traffic should use the Hub's inner IPv4 forwarding path described
 above.
+
+IPv4 multicast is replicated by the sending node to every peer on the link; no
+peer prefix for `224.0.0.0/4` is required. The kernel does not currently track
+IGMP membership, so all configured peers receive a copy. Account for the outer
+bandwidth created by this full replication on larger deployments or with
+high-rate groups. Applications must still join their groups normally, and the
+local routing table must direct the group to dtun, for example:
+
+```sh
+sudo ip route add 239.192.0.0/16 dev dtun0
+```
 
 ## 8. Operations and troubleshooting
 

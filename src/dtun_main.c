@@ -239,6 +239,41 @@ static struct dtun_peer *dtun_route_peer(struct dtun_dev *d, struct sk_buff *skb
 	return best;
 }
 
+/*
+ * Multicast has no single longest-prefix destination.  Take references to a
+ * snapshot of every configured peer so the packet can be replicated without
+ * holding peer_lock across route lookup and outer transmission.
+ */
+static int dtun_peer_snapshot(struct dtun_dev *d, struct dtun_peer ***snapshot)
+{
+	struct dtun_peer **peers;
+	struct dtun_peer *peer;
+	unsigned int count = 0, used = 0;
+
+	*snapshot = NULL;
+	spin_lock_bh(&d->peer_lock);
+	list_for_each_entry(peer, &d->peers, list)
+		count++;
+	spin_unlock_bh(&d->peer_lock);
+	if (!count)
+		return 0;
+
+	peers = kmalloc_array(count, sizeof(*peers), GFP_ATOMIC);
+	if (!peers)
+		return -ENOMEM;
+
+	spin_lock_bh(&d->peer_lock);
+	list_for_each_entry(peer, &d->peers, list) {
+		if (used == count)
+			break;
+		refcount_inc(&peer->refs);
+		peers[used++] = peer;
+	}
+	spin_unlock_bh(&d->peer_lock);
+	*snapshot = peers;
+	return used;
+}
+
 static enum dtun_transport dtun_choose_path(struct dtun_dev *d,
 					     struct dtun_peer *peer,
 					     __be32 *addr, __be16 *port)
@@ -368,7 +403,8 @@ static bool dtun_replay_ok(struct dtun_peer *peer, u64 seq)
 }
 
 static void dtun_udp_ip_xmit(struct dtun_dev *d, struct rtable *rt,
-			      struct sk_buff *skb, __be32 addr, int stats_len)
+			      struct sk_buff *skb, __be32 source, __be32 addr,
+			      int stats_len)
 {
 	struct net *net = dev_net(d->dev);
 	struct iphdr *ip;
@@ -386,7 +422,7 @@ static void dtun_udp_ip_xmit(struct dtun_dev *d, struct rtable *rt,
 	ip->frag_off = htons(IP_DF);
 	ip->ttl = IPDEFTTL;
 	ip->protocol = IPPROTO_UDP;
-	ip->saddr = d->local_addr;
+	ip->saddr = source;
 	ip->daddr = addr;
 	ip->check = 0;
 	ip_select_ident(net, skb, NULL);
@@ -404,6 +440,7 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 	struct flowi4 fl4;
 	struct rtable *rt;
 	struct sk_buff *skb;
+	__be32 source;
 	size_t frame_len = sizeof(*hdr) + payload_len;
 	int err;
 
@@ -455,7 +492,13 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 			err = PTR_ERR(rt);
 			goto out_free;
 		}
-		iptunnel_xmit(NULL, rt, skb, d->local_addr, addr, DTUN_IPPROTO,
+		source = fl4.saddr;
+		if (!source) {
+			ip_rt_put(rt);
+			err = -EADDRNOTAVAIL;
+			goto out_free;
+		}
+		iptunnel_xmit(NULL, rt, skb, source, addr, DTUN_IPPROTO,
 			      0, IPDEFTTL, 0, false);
 	} else {
 		struct udphdr *udp;
@@ -467,6 +510,12 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 			err = PTR_ERR(rt);
 			goto out_free;
 		}
+		source = fl4.saddr;
+		if (!source) {
+			ip_rt_put(rt);
+			err = -EADDRNOTAVAIL;
+			goto out_free;
+		}
 		/* Construct UDP and IPv4 explicitly.  Socket and generic tunnel sends
 		 * can carry reroute state that suppresses the ordinary LOCAL_OUT hook;
 		 * this fresh skb deliberately enters ip_local_out() with a clean IPCB. */
@@ -476,8 +525,8 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 		udp->dest = port;
 		udp->len = htons(skb->len);
 		udp->check = 0;
-		udp_set_csum(false, skb, d->local_addr, addr, skb->len);
-		dtun_udp_ip_xmit(d, rt, skb, addr,
+		udp_set_csum(false, skb, source, addr, skb->len);
+		dtun_udp_ip_xmit(d, rt, skb, source, addr,
 				 payload_len ? (int)payload_len : (int)frame_len);
 	}
 	return 0;
@@ -501,13 +550,27 @@ static int dtun_send(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 static netdev_tx_t dtun_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dtun_dev *d = netdev_priv(dev);
-	struct dtun_peer *peer;
+	struct dtun_peer **peers = NULL;
+	struct dtun_peer *peer = NULL;
+	unsigned int peer_count = 0, i;
+	bool multicast = false;
 	u8 *payload;
 	int err;
 
-	peer = dtun_route_peer(d, skb);
-	if (!peer) {
+	if (skb->protocol == htons(ETH_P_IP) &&
+	    pskb_may_pull(skb, sizeof(struct iphdr)))
+		multicast = ipv4_is_multicast(ip_hdr(skb)->daddr);
+
+	if (multicast) {
+		err = dtun_peer_snapshot(d, &peers);
+		if (err > 0)
+			peer_count = err;
+	} else {
+		peer = dtun_route_peer(d, skb);
+	}
+	if ((!multicast && !peer) || (multicast && !peer_count)) {
 		dev->stats.tx_dropped++;
+		kfree(peers);
 		dev_kfree_skb(skb);
 		return NETDEV_TX_OK;
 	}
@@ -515,14 +578,29 @@ static netdev_tx_t dtun_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (!payload || skb_copy_bits(skb, 0, payload, skb->len)) {
 		dev->stats.tx_dropped++;
 		kfree(payload);
-		dtun_peer_put(peer);
+		if (peer)
+			dtun_peer_put(peer);
+		for (i = 0; i < peer_count; i++)
+			dtun_peer_put(peers[i]);
+		kfree(peers);
 		dev_kfree_skb(skb);
 		return NETDEV_TX_OK;
 	}
-	err = dtun_send(d, peer, DTUN_FRAME_DATA, payload, skb->len);
-	dtun_peer_put(peer);
-	if (err)
-		DEV_STATS_INC(dev, tx_errors);
+	if (multicast) {
+		for (i = 0; i < peer_count; i++) {
+			err = dtun_send(d, peers[i], DTUN_FRAME_DATA, payload,
+					skb->len);
+			if (err)
+				DEV_STATS_INC(dev, tx_errors);
+			dtun_peer_put(peers[i]);
+		}
+		kfree(peers);
+	} else {
+		err = dtun_send(d, peer, DTUN_FRAME_DATA, payload, skb->len);
+		dtun_peer_put(peer);
+		if (err)
+			DEV_STATS_INC(dev, tx_errors);
+	}
 	kfree(payload);
 	dev_kfree_skb(skb);
 	return NETDEV_TX_OK;
@@ -556,7 +634,7 @@ static void dtun_setup(struct net_device *dev)
 {
 	dev->netdev_ops = &dtun_netdev_ops;
 	dev->type = ARPHRD_NONE;
-	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
+	dev->flags = IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
 	dev->tx_queue_len = 10000;
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);

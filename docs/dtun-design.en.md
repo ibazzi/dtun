@@ -90,8 +90,13 @@ An authenticated UDP observation is also published through the Generic Netlink
 
 ## 5. Routing, probes, and path selection
 
-Transmit accepts inner IPv4 skbs only and performs longest-prefix matching over
-all peer prefixes. No match drops the packet and increments `tx_dropped`.
+Transmit accepts inner IPv4 skbs only. Unicast performs longest-prefix matching
+over all peer prefixes; no match drops the packet and increments `tx_dropped`.
+IPv4 multicast bypasses the prefix table and creates one DATA frame for every
+currently configured peer. The device advertises `IFF_MULTICAST`, but does not
+track IGMP membership, so this is all-peer flooding; multicast is also dropped
+when there are no peers. Every copy uses that peer's own tunnel IDs, sequence,
+HMAC, and path selection.
 
 Every 5 seconds, a workqueue does the following for each peer:
 
@@ -117,7 +122,8 @@ pool route combined with inner IPv4 forwarding on the Hub.
 ## 6. Outer transmission and lifecycle
 
 Raw output uses `ip_route_output_key` and `iptunnel_xmit`. UDP output constructs
-UDP/IPv4 headers explicitly and calls `ip_local_out`. Both paths traverse IPv4
+UDP/IPv4 headers explicitly and calls `ip_local_out`. When `local_outer_ip` is
+zero, both paths use the source selected by the outer route lookup. Both traverse IPv4
 local-output/netfilter, and neither calls `kernel_sendmsg` from
 `ndo_start_xmit`.
 
@@ -178,11 +184,13 @@ node/tunnel IDs, up to 128 node records, and every allocated Spoke-pair session.
 Each Hub-to-Spoke and Spoke-pair relationship gets distinct bidirectional tunnel
 IDs allocated from 100 and persisted.
 
-There is currently no lease expiry, node deregistration, or online reclamation;
-`last_seen` is recorded but not used for cleanup. A Spoke using an automatically
-allocated node ID requests a new record after every process restart. Stable
-deployments must configure a fixed nonzero node ID, or stale allocations will
-eventually consume the 128-node limit and address pool.
+Once per second, the Hub checks node leases using `last_seen`, which is updated
+by the last successful CONFIRM. After `peer_timeout` (60 seconds by default), it
+removes the Hub kernel peer, node record, and every Spoke-pair session that
+references the node, then atomically saves state. Online Spokes receive a SYNC
+without the expired node on their next periodic registration, and `apply_sync`
+removes the local direct peer. A returning expired node receives new tunnel and
+session IDs. Stable deployments should still configure a fixed nonzero node ID.
 
 State is saved using the current C structure's binary layout. It is suitable for
 daemon restart recovery on the same platform and should not be treated as a
@@ -233,7 +241,8 @@ determine whether Raw enters its active window.
   upgraded together.
 - Hub state is a versioned local binary structure and is not portable across
   every ABI or architecture.
-- The Hub has no node lease, deregistration, or stale-record reclamation.
+- There is no explicit deregistration message. Registration lease expiry
+  performs stale cleanup, and other Spokes learn it through periodic SYNC.
 - `dtunctl` has no peer-list or statistics command; reserved `STATS_GET` remains
   unimplemented.
 - The tunnel has no congestion control, PMTU discovery, fragmentation strategy,

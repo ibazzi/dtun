@@ -6,6 +6,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 IP=${IP:-"$ROOT/bin/ip"}
 DUND=${DUND:-"$ROOT/bin/dtund"}
 CTL=${CTL:-"$ROOT/bin/dtunctl"}
+MULTICAST=${MULTICAST:-"$ROOT/tests/multicast.py"}
 KEY=${KEY:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}
 PREFIX=dtunp2
 HUB=${PREFIX}h
@@ -24,6 +25,8 @@ stop_pid() {
 }
 
 cleanup() {
+	stop_pid "$OUT/mcast-hub.pid"
+	stop_pid "$OUT/mcast-b.pid"
 	stop_pid "$OUT/a.pid"
 	stop_pid "$OUT/b.pid"
 	stop_pid "$OUT/hub.pid"
@@ -75,6 +78,7 @@ bind_address = 0.0.0.0
 bind_port = 49001
 pool = 10.99.0.0/24
 state_file = $OUT/hub.state
+peer_timeout = 5
 EOF
 
 spoke_config() {
@@ -134,4 +138,48 @@ done
 ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=0
 ip netns exec "$A" ping -c 3 -W 2 10.99.0.3
 ip netns exec "$B" ping -c 3 -W 2 10.99.0.2
+
+# Multicast does not have a single prefix owner.  One packet from A must be
+# replicated to both its Hub peer and its direct B peer.
+ip -n "$A" route add 239.192.0.1/32 dev dtun0
+ip netns exec "$HUB" python3 "$MULTICAST" receive --group 239.192.0.1 \
+	--interface 10.99.0.1 --port 50000 --message dtun-multicast \
+	> "$OUT/mcast-hub.out" &
+echo $! > "$OUT/mcast-hub.pid"
+ip netns exec "$B" python3 "$MULTICAST" receive --group 239.192.0.1 \
+	--interface 10.99.0.3 --port 50000 --message dtun-multicast \
+	> "$OUT/mcast-b.out" &
+echo $! > "$OUT/mcast-b.pid"
+sleep 1
+ip netns exec "$A" python3 "$MULTICAST" send --group 239.192.0.1 \
+	--interface 10.99.0.2 --port 50000 --message dtun-multicast
+wait "$(cat "$OUT/mcast-hub.pid")" || {
+	rm -f "$OUT/mcast-hub.pid"
+	fail "Hub did not receive multicast"
+}
+rm -f "$OUT/mcast-hub.pid"
+wait "$(cat "$OUT/mcast-b.pid")" || {
+	rm -f "$OUT/mcast-b.pid"
+	fail "Spoke did not receive multicast"
+}
+rm -f "$OUT/mcast-b.pid"
+grep -qx 'dtun-multicast' "$OUT/mcast-hub.out" || fail "Hub multicast payload mismatch"
+grep -qx 'dtun-multicast' "$OUT/mcast-b.out" || fail "Spoke multicast payload mismatch"
+
+# A stopped Spoke must expire from the Hub kernel/state.  The surviving Spoke
+# learns the reduced membership through its next periodic registration SYNC.
+stop_pid "$OUT/b.pid"
+expired=0
+ifh=$(ip -n "$HUB" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
+for i in $(seq 1 15); do
+	if ! ip netns exec "$HUB" "$CTL" peer-get --ifindex "$ifh" \
+		--tunnel-id 103 >/dev/null 2>&1 &&
+	   ! ip netns exec "$A" "$CTL" peer-get --ifindex "$ifa" --tunnel-id 104 >/dev/null 2>&1; then
+		expired=1
+		break
+	fi
+	sleep 1
+done
+[ "$expired" = 1 ] || fail "expired Spoke was not removed from Hub and surviving Spoke"
+grep -q 'Expired Spoke NodeID=3' "$OUT/hub.log" || fail "Hub did not log Spoke expiry"
 echo "dtun C point-to-multipoint netns regression passed"

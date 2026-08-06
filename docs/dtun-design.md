@@ -75,8 +75,11 @@ daemon 不订阅该事件，而是在生成 SYNC 前调用 `PEER_GET` 获取最�
 
 ## 5. 路由、探测与路径选择
 
-发送端仅接受内层 IPv4 skb，并在所有 peer 前缀中执行最长前缀匹配。没有匹配项时
-丢包并增加 `tx_dropped`。
+发送端仅接受内层 IPv4 skb。单播在所有 peer 前缀中执行最长前缀匹配，没有匹配项
+时丢包并增加 `tx_dropped`；IPv4 组播不使用前缀表，而是为当时已配置的每个 peer
+复制一份 DATA 帧。设备声明 `IFF_MULTICAST`，但当前不跟踪 IGMP 成员关系，因此这是
+全 peer 泛洪；没有 peer 时同样丢包。每份副本使用对应 peer 独立的 tunnel ID、序列号、
+HMAC 和路径选择。
 
 每 5 秒的 workqueue 对每个 peer：
 
@@ -97,7 +100,8 @@ DATA 的实际选择规则为：
 ## 6. 外层发送与生命周期
 
 Raw 发送通过 `ip_route_output_key` 和 `iptunnel_xmit`；UDP 显式构造 UDP/IPv4 头，
-通过 `ip_local_out` 输出。两条路径都经过 IPv4 local-output/netfilter，且不会在
+通过 `ip_local_out` 输出。`local_outer_ip` 为零时，两条路径都使用外层路由查询选出的
+源地址。两条路径都经过 IPv4 local-output/netfilter，且不会在
 `ndo_start_xmit` 中调用 `kernel_sendmsg`。
 
 DATA 发送会复制内层 skb 负载，再构造独立外层 skb；路由或分配失败计入发送错误。
@@ -146,9 +150,11 @@ Hub 状态 magic 为 `DTS2`、版本为 2，持久化 cookie 密钥、下一个 
 最多 128 个节点记录及所有已分配 spoke-pair 会话。每个 Hub↔Spoke 和每个 Spoke 对
 都有独立的双向 tunnel ID，分配从 100 开始并持久化。
 
-当前没有租约到期、节点注销或在线回收机制；`last_seen` 只被记录，不参与清理。
-使用自动 node ID 的 Spoke 每次进程重启都会申请新记录，因此稳定部署必须配置固定
-非 0 node ID，否则陈旧分配会持续占用 128 节点上限和地址池。
+Hub 每秒根据最后一次成功 CONFIRM 更新的 `last_seen` 检查节点租约。超过
+`peer_timeout`（默认 60 秒）后，删除 Hub 内核 peer、节点记录及引用该节点的所有
+spoke-pair session，并原子保存状态。仍在线的 Spoke 在下一次周期注册获得不含过期
+节点的 SYNC，`apply_sync` 随即删除本地直连 peer。重新注册的过期节点会获得新的
+tunnel/session ID。稳定部署仍应配置固定非 0 node ID。
 
 状态以当前 C 结构的二进制布局保存，因此适合同一平台上的 daemon 重启恢复，不应
 当作跨架构交换格式。保存使用同目录 `.tmp` 文件、刷新、`fsync` 和原子重命名。
@@ -181,6 +187,7 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - DTRG v2 只支持当前 C Hub/Spoke；旧 C/Python 控制面明确不兼容，升级时必须同步
   替换全部控制面节点。
 - Hub 状态是带版本的本地二进制结构，不保证跨 ABI/架构可移植。
-- Hub 没有节点租约、注销或陈旧记录回收机制。
+- Hub 没有显式注销消息；掉线清理由注册租约超时驱动，通知随其他 Spoke 的周期 SYNC
+  传播。
 - `dtunctl` 没有 peer-list 或统计命令；预留的 `STATS_GET` 尚未实现。
 - 隧道没有拥塞控制、PMTU 发现、分片重组策略或生产级密钥管理。

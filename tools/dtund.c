@@ -605,6 +605,87 @@ static hub_session_record_t *hub_session(uint64_t node_id, uint64_t other_id)
     return session;
 }
 
+static int hub_node_expired(const hub_node_record_t *node, time_t now,
+                            int timeout)
+{
+    if (timeout <= 0) timeout = 60;
+    if (node->last_seen > 0 && now < node->last_seen)
+        return 0;
+    return node->last_seen <= 0 || now - node->last_seen > timeout;
+}
+
+static void hub_remove_node_at(uint32_t index)
+{
+    uint64_t node_id = g_hub_state.nodes[index].node_id;
+    uint32_t i;
+
+    for (i = 0; i < g_hub_state.session_count;) {
+        hub_session_record_t *session = &g_hub_state.sessions[i];
+
+        if (session->first_node != node_id && session->second_node != node_id) {
+            i++;
+            continue;
+        }
+        if (i + 1 < g_hub_state.session_count)
+            memmove(&g_hub_state.sessions[i], &g_hub_state.sessions[i + 1],
+                    (size_t)(g_hub_state.session_count - i - 1) *
+                    sizeof(g_hub_state.sessions[0]));
+        g_hub_state.session_count--;
+    }
+    if (index + 1 < g_hub_state.node_count)
+        memmove(&g_hub_state.nodes[index], &g_hub_state.nodes[index + 1],
+                (size_t)(g_hub_state.node_count - index - 1) *
+                sizeof(g_hub_state.nodes[0]));
+    g_hub_state.node_count--;
+    memset(&g_hub_state.nodes[g_hub_state.node_count], 0,
+           sizeof(g_hub_state.nodes[0]));
+}
+
+static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex)
+{
+    time_t now = time(NULL);
+    int timeout = config->peer_timeout > 0 ? config->peer_timeout : 60;
+    uint32_t i = 0;
+    int changed = 0;
+
+    while (i < g_hub_state.node_count) {
+        hub_node_record_t *node = &g_hub_state.nodes[i];
+        uint64_t node_id;
+        uint32_t tunnel_id;
+        struct in_addr address;
+        int err;
+
+        if (!hub_node_expired(node, now, timeout)) {
+            i++;
+            continue;
+        }
+        node_id = node->node_id;
+        tunnel_id = node->hub_tunnel_id;
+        address = node->address;
+        err = dtun_nl_peer_del(ifindex, tunnel_id);
+        if (err < 0 && err != -ENOENT) {
+            fprintf(stderr,
+                    "[dtund Hub] Failed to remove expired Spoke NodeID=%llu: %s\n",
+                    (unsigned long long)node_id, strerror(-err));
+            i++;
+            continue;
+        }
+        hub_remove_node_at(i);
+        changed = 1;
+        {
+            char text[INET_ADDRSTRLEN];
+
+            inet_ntop(AF_INET, &address, text, sizeof(text));
+            printf("[dtund Hub] Expired Spoke NodeID=%llu InnerIP=%s after %ds\n",
+                   (unsigned long long)node_id, text, timeout);
+            fflush(stdout);
+        }
+    }
+    if (changed && hub_save_state(config->state_file) < 0)
+        return -1;
+    return changed;
+}
+
 static int program_peer(const dtun_nl_peer_info_t *peer)
 {
     dtun_nl_peer_info_t update;
@@ -715,6 +796,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                                   (struct sockaddr *)&source, &source_len);
         dtrg_msg_t message;
 
+        (void)hub_expire_nodes(config, ifindex);
         if (length <= 0) continue;
         if (dtrg_parse(psk, rx, (size_t)length, &message) < 0) continue;
         if (message.kind == DTRG_INIT) {

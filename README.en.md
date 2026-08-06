@@ -15,11 +15,13 @@ synchronization.
 
 ## Current capabilities
 
-- IPv4 longest-prefix peer selection with a default MTU of 1200.
+- IPv4 unicast uses longest-prefix peer selection; multicast is replicated to
+  every peer. The default MTU is 1200.
 - Raw IP as the preferred path, followed by a configured UDP endpoint.
 - Authenticated UDP frames can update the source `IP:port` learned through NAT.
 - The DTRG v2 control plane supports periodic registration, persistent Hub
-  state, and `/32` direct-peer synchronization between Spokes.
+  state, offline lease expiry, and `/32` direct-peer synchronization between
+  Spokes.
 - C `dtund` and `dtunctl` are the only supported control plane; Python remains
   only in packet-generation test helpers.
 - Both Raw and UDP outer output pass through IPv4 local-output/netfilter.

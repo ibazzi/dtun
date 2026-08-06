@@ -34,6 +34,7 @@ void dtun_config_init(dtun_config_t *config) {
     config->pool = strdup_safe("10.99.0.0/24");
     config->state_file = strdup_safe("/var/lib/dtun/hub.state");
     config->cookie_seconds = 30;
+    config->peer_timeout = 60;
 
     config->hub_address = NULL;
     config->hub_port = 49001;
@@ -127,6 +128,8 @@ int dtun_config_load(dtun_config_t *config, const char *filepath) {
             config->state_file = strdup_safe(val);
         } else if (strcmp(key, "cookie_seconds") == 0) {
             config->cookie_seconds = atoi(val);
+        } else if (strcmp(key, "peer_timeout") == 0) {
+            config->peer_timeout = atoi(val);
         } else if (strcmp(key, "hub_address") == 0) {
             free(config->hub_address);
             config->hub_address = strdup_safe(val);
