@@ -1,6 +1,4 @@
 .PHONY: all build modules ctools clean check test p2mp-test deb
-obj-m += dtun.o
-dtun-y := src/dtun_main.o src/dtun_netlink.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 IP ?= $(CURDIR)/bin/ip
@@ -18,9 +16,12 @@ CTL_OBJS = $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_D
 all: modules ctools
 
 modules:
-	@mkdir -p $(BUILD_DIR)
-	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
-	cp -f dtun.ko $(BUILD_DIR)/dtun.ko
+	@mkdir -p $(BUILD_DIR)/src
+	@cp -f Kbuild $(BUILD_DIR)/Kbuild
+	@ln -snf $(CURDIR)/src/dtun_main.c $(BUILD_DIR)/src/dtun_main.c
+	@ln -snf $(CURDIR)/src/dtun_netlink.c $(BUILD_DIR)/src/dtun_netlink.c
+	@ln -snf $(CURDIR)/src/dtun.h $(BUILD_DIR)/src/dtun.h
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/$(BUILD_DIR) modules
 
 ctools: $(BUILD_DIR)/dtund $(BUILD_DIR)/dtunctl
 
@@ -45,7 +46,9 @@ $(BUILD_DIR)/test_daemon_state: tests/test_daemon_state.c tools/dtund.c $(CTL_OB
 	$(CC) $(CFLAGS) $< $(CTL_OBJS) $(LDFLAGS) -o $@
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+	@if [ -d "$(BUILD_DIR)" ]; then \
+		$(MAKE) -C $(KDIR) M=$(CURDIR)/$(BUILD_DIR) clean 2>/dev/null || true; \
+	fi
 	rm -rf $(BUILD_DIR)
 
 check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state
