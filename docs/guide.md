@@ -1,0 +1,253 @@
+# dtun 部署与运行指南
+
+[English](guide.en.md) | **简体中文**
+
+本文依据当前 C daemon 和内核模块实现编写。`dtun` 是认证型 L3 隧道原型，不是
+加密 VPN；部署前请先阅读[设计参考](dtun-design.md)中的限制与兼容性。
+
+## 1. 规划与依赖
+
+一套基本部署包含一个 Hub 和一个或多个 Spoke：
+
+| 流量 | 默认端口/协议 | 方向 | 用途 |
+| --- | --- | --- | --- |
+| 注册控制面 | UDP 49001 | Spoke → Hub | DTRG v2 注册和 SYNC |
+| 数据面 | UDP 49000 | 双向 | NAT 兼容的数据承载与探测 |
+| 数据面 | IPv4 协议 253 | 双向 | 优先使用的 Raw IP 承载 |
+
+Hub 需要公网可达的控制地址。UDP 必须可用；Raw IP 253 是可选的性能路径，普通 NAT
+通常不会转发它。若希望没有直连候选的 spoke 通过 Hub 的内层路由互通，还需要在
+Hub 上启用 IPv4 forwarding，并允许相关 FORWARD 流量。
+
+构建依赖：
+
+- Linux 6.6 或更高版本，以及与目标内核匹配的 headers/build tree；
+- GCC/Clang、GNU make 和 OpenSSL libcrypto 开发包；
+- 运行时具备 `CAP_NET_ADMIN`，加载模块还需要 `CAP_SYS_MODULE`。
+
+## 2. 构建与加载
+
+```sh
+make KDIR=/lib/modules/$(uname -r)/build
+sudo insmod ./dtun.ko
+```
+
+构建结果包括 `dtun.ko`、`bin/dtund` 和 `bin/dtunctl`。确认模块已加载：
+
+```sh
+lsmod | grep '^dtun'
+```
+
+仓库中的 `bin/ip` 基于 iproute2 7.1.0，当前为 x86-64 动态链接二进制。若架构或
+运行库不兼容，请根据 [iproute2 扩展说明](../iproute2/README.md)自行构建，不要使用
+无法编码 dtun link 属性的原版 `ip` 创建接口。
+
+## 3. 密钥与文件权限
+
+生成 32 字节 PSK，并安全分发给同一网络中的 Hub 和所有 Spoke：
+
+```sh
+openssl rand -hex 32
+sudo install -d -m 0750 /etc/dtun /var/lib/dtun
+sudo install -m 0600 samples/dtun-hub.conf /etc/dtun/hub.conf
+```
+
+配置中的 `psk` 必须是 64 个十六进制字符。省略 `psk` 时，daemon 会进入零密钥
+开发模式：DTRG 使用公开可推导的全零密钥，数据 peer 不校验 HMAC。该模式只能用于
+隔离测试，不能部署到真实网络。
+
+Hub 状态文件包含持久化 cookie 密钥、节点和会话分配，应由运行用户独占访问。
+daemon 会创建父目录，并通过临时文件、`fflush`、`fsync` 和原子 `rename` 保存，
+但最终权限仍受进程 `umask` 和目录权限影响。
+
+## 4. 配置参考
+
+INI 段名用于组织配置；当前解析器按键名读取，下表中的段归属是约定用法。
+
+### `[global]`
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `mode` | 无 | 必填，`hub` 或 `spoke`；也可由 `--mode` 覆盖 |
+| `interface` | `dtun0` | daemon 创建和管理的接口名 |
+| `local_outer_ip` | `0.0.0.0` | 本机外层 IPv4；实际部署应显式填写 |
+| `data_port` | `49000` | 本地数据面 UDP 端口 |
+| `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
+| `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
+| `psk` | 无 | 32 字节 PSK 的 64 位十六进制表示；省略仅供不安全测试 |
+
+### `[hub]`
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `bind_address` | `0.0.0.0` | 注册控制 socket 的监听地址 |
+| `bind_port` | `49001` | 注册控制 UDP 端口 |
+| `pool` | `10.99.0.0/24` | Spoke 内层地址池，当前只接受 `/0` 至 `/30` |
+| `state_file` | `/var/lib/dtun/hub.state` | 带版本的二进制持久化状态 |
+| `cookie_seconds` | `30` | cookie 时间桶秒数；非正数回退为 30 |
+
+### `[spoke]`
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `hub_address` | 无 | 必填，Hub 控制面的 IPv4 地址 |
+| `hub_port` | `49001` | Hub 控制端口，不是数据端口 |
+| `local_port` | `0` | 注册控制 socket 的本地源端口；0 表示临时端口 |
+| `interval` | `20` | 每次注册尝试后的重试/刷新间隔；非正数按 1 秒处理 |
+| `timeout` | `5` | 每个控制响应的接收超时；非正数回退为 5 秒 |
+| `once` | `false` | 首次尝试后退出；成功时保留接口，失败时返回非零 |
+
+## 5. 部署 Hub
+
+Hub 的实际 `node_id` 为 1。以下配置使用文档保留地址，请替换外层地址和 PSK：
+
+```ini
+[global]
+mode = hub
+interface = dtun0
+local_outer_ip = 192.0.2.1
+data_port = 49000
+node_id = 1
+address = 10.99.0.1/24
+psk = REPLACE_WITH_64_HEX_CHARACTERS
+
+[hub]
+bind_address = 0.0.0.0
+bind_port = 49001
+pool = 10.99.0.0/24
+state_file = /var/lib/dtun/hub.state
+cookie_seconds = 30
+```
+
+地址池规则：
+
+- Hub 内层地址必须位于池内，且不能是网络地址或广播地址；
+- 网络地址、广播地址、池内第一个可用地址和 Hub 实际地址不会分配给 Spoke；
+- 静态 Spoke 地址必须使用池前缀，且不能冲突；
+- 同一 node ID 不能改绑到其他地址，node ID 1 仅供 Hub；
+- `node_id = 0` 和 `address = 0.0.0.0/<池前缀>` 分别请求自动 ID 和自动地址；
+- 最多保存 128 个 Spoke，池耗尽或达到上限时注册会被拒绝。
+
+启动：
+
+```sh
+sudo ./bin/dtund -c /etc/dtun/hub.conf
+```
+
+状态文件缺失时会初始化；旧版无头 C 状态可自动导入，但这只属于本地状态迁移，
+不提供旧控制协议兼容。文件截断、版本不支持、记录冲突或计数越界时，Hub 会拒绝
+启动，不会静默清空状态。正常收到 SIGINT、SIGTERM 或 SIGHUP 时，Hub 停止并删除
+自己管理的接口；SIGHUP 当前不表示重新加载配置。
+
+## 6. 部署 Spoke
+
+静态地址配置：
+
+```ini
+[global]
+mode = spoke
+interface = dtun0
+local_outer_ip = 192.0.2.2
+data_port = 49000
+node_id = 2
+address = 10.99.0.2/24
+psk = REPLACE_WITH_64_HEX_CHARACTERS
+
+[spoke]
+hub_address = 192.0.2.1
+hub_port = 49001
+local_port = 0
+interval = 20
+timeout = 5
+once = false
+```
+
+需要由 Hub 持久分配地址时，推荐配置一个稳定且唯一的 node ID，只把地址设为 0：
+
+```ini
+node_id = 2
+address = 0.0.0.0/24
+```
+
+`node_id = 0` 也会请求自动 ID，但 Spoke 不会把结果写回配置文件；进程重启后会再次
+申请新 ID。该模式只适合短期测试，长期节点必须配置稳定的非 0 node ID。
+
+启动：
+
+```sh
+sudo ./bin/dtund -c /etc/dtun/spoke.conf
+```
+
+首次成功 ACK 后，Spoke 使用自己的 `data_port` 绑定本地接口，并使用 ACK 返回的 Hub
+数据端口配置 Hub peer。常驻进程每个周期生成新 nonce 重新注册：Hub 暂时不可达时
+保留已有接口、peer 和路由，恢复后自动协调。正常终止常驻进程会删除接口。
+
+daemon 认为 `interface` 完全归自己管理；创建前会删除同名现有接口。不要让多个进程
+共享同一个接口名，也不要把需保留的手工接口交给常驻 daemon。
+
+`once = true` 适合由其他进程接管接口生命周期：第一次注册成功后 daemon 退出并
+保留接口；第一次失败则退出且返回非零。
+
+## 7. 直连、Hub 转发与回退
+
+Spoke 始终安装指向 Hub peer 的地址池路由。Hub 为每个 Spoke 安装 `/32`，因此在
+Hub 开启 IPv4 forwarding 且防火墙允许时，未建立直连的 spoke 流量可以在内层经过
+Hub 转发：
+
+```sh
+sudo sysctl -w net.ipv4.ip_forward=1
+```
+
+Hub 仅在 `peer-get` 显示另一个 Spoke 的认证 UDP 候选为有效时，才把该节点写入
+`SYNC`。接收方为其安装独立双向 tunnel ID 和 `/32`；后续有效 SYNC 中消失的项会
+被删除。周期注册让老节点最终获得新节点信息。
+
+内核发送路径的实际顺序是：
+
+```text
+15 秒内收到过有效帧的 Raw 候选 → 任何已配置的直连 UDP 端点 → 接口 Hub 端点
+```
+
+`udp_up` 是观测状态，当前不作为 UDP 发送门槛。接口的 `hub`/`hub_port` 只是当 peer
+没有 UDP 端点时替换发送目的地址；它不会重写目标 node/tunnel ID，因此不是通用的
+spoke 间外层 relay。spoke 间可靠回退应使用上述 Hub 内层 IPv4 转发路径。
+
+## 8. 运维与排障
+
+```sh
+ip -s link show dtun0
+ip address show dev dtun0
+ip route show dev dtun0
+ss -lunp | grep -E '49000|49001'
+dmesg | grep -i dtun
+```
+
+已知本地 tunnel ID 时可查询候选和活跃状态：
+
+```sh
+IFINDEX=$(cat /sys/class/net/dtun0/ifindex)
+sudo ./bin/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
+```
+
+`dtunctl` 当前没有 peer-list，`peer-get` 必须提供本地 tunnel ID。`raw_up` 表示最近
+15 秒内收到过该 peer 的有效 Raw 帧；`udp_up` 表示最近 15 秒内收到过有效 UDP 帧。
+
+常见问题：
+
+- Raw 始终不活跃：检查双方公网地址、IPv4 协议 253 的安全组/防火墙以及 NAT；
+- UDP 无流量：确认本机 `data_port` 未占用，Hub 数据端口双向可达；
+- 注册无 ACK：核对 PSK、控制端口、node ID 和内层地址池规则；
+- spoke 间只能直连不能经 Hub：检查 Hub 的 IPv4 forwarding 和 FORWARD 策略；
+- 模块无法加载：确认构建所用 headers 与运行内核完全匹配。
+
+## 9. 测试
+
+```sh
+make check
+make test
+make p2mp-test
+sudo bash tests/cdaemon/run-all.sh
+```
+
+`make test` 和 `make p2mp-test` 会创建临时 network namespace。完整 C daemon 套件还
+会使用 `iptables`、`tc netem`、`tcpdump` 和 `iperf3`，日志写入 `/tmp/dtun-test`。

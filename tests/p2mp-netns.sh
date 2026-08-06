@@ -1,0 +1,137 @@
+#!/bin/sh
+# Isolated C Hub + two-spoke direct-path regression. Run as root.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+IP=${IP:-"$ROOT/bin/ip"}
+DUND=${DUND:-"$ROOT/bin/dtund"}
+CTL=${CTL:-"$ROOT/bin/dtunctl"}
+KEY=${KEY:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}
+PREFIX=dtunp2
+HUB=${PREFIX}h
+A=${PREFIX}a
+B=${PREFIX}b
+BR=${PREFIX}br
+OUT=/tmp/dtun-p2mp
+
+stop_pid() {
+	file=$1
+	if [ -f "$file" ]; then
+		kill -TERM "$(cat "$file")" 2>/dev/null || true
+		wait "$(cat "$file")" 2>/dev/null || true
+		rm -f "$file"
+	fi
+}
+
+cleanup() {
+	stop_pid "$OUT/a.pid"
+	stop_pid "$OUT/b.pid"
+	stop_pid "$OUT/hub.pid"
+	ip netns del "$HUB" 2>/dev/null || true
+	ip netns del "$A" 2>/dev/null || true
+	ip netns del "$B" 2>/dev/null || true
+	ip link del "$BR" 2>/dev/null || true
+	iptables -D FORWARD -i "$BR" -j ACCEPT 2>/dev/null || true
+	iptables -D FORWARD -o "$BR" -j ACCEPT 2>/dev/null || true
+	ip link del "${HUB}v" 2>/dev/null || true
+	ip link del "${A}v" 2>/dev/null || true
+	ip link del "${B}v" 2>/dev/null || true
+	[ "${KEEP:-0}" = 1 ] || rm -rf "$OUT"
+}
+trap cleanup EXIT INT TERM
+cleanup
+mkdir -p "$OUT"
+if ! lsmod | grep -q '^dtun '; then
+	modprobe dtun 2>/dev/null || insmod "$ROOT/dtun.ko"
+fi
+
+ip link add "$BR" type bridge
+ip link set "$BR" up
+iptables -I FORWARD -i "$BR" -j ACCEPT
+iptables -I FORWARD -o "$BR" -j ACCEPT
+for spec in "$HUB:1" "$A:2" "$B:3"; do
+	ns=${spec%:*}; octet=${spec#*:}; hostv=${ns}v
+	ip netns add "$ns"
+	ip link add "$hostv" type veth peer name eth0 netns "$ns"
+	ip link set "$hostv" master "$BR"
+	ip link set "$hostv" up
+	ip -n "$ns" link set lo up
+	ip -n "$ns" addr add "172.30.90.$octet/24" dev eth0
+	ip -n "$ns" link set eth0 up
+done
+ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=1
+
+cat > "$OUT/hub.conf" <<EOF
+[global]
+mode = hub
+interface = dtun0
+local_outer_ip = 172.30.90.1
+data_port = 49000
+node_id = 1
+address = 10.99.0.1/24
+psk = $KEY
+[hub]
+bind_address = 0.0.0.0
+bind_port = 49001
+pool = 10.99.0.0/24
+state_file = $OUT/hub.state
+EOF
+
+spoke_config() {
+	name=$1; outer=$2; node=$3; inner=$4
+	cat > "$OUT/$name.conf" <<EOF
+[global]
+mode = spoke
+interface = dtun0
+local_outer_ip = $outer
+data_port = 49000
+node_id = $node
+address = $inner/24
+psk = $KEY
+[spoke]
+hub_address = 172.30.90.1
+hub_port = 49001
+local_port = 0
+interval = 2
+timeout = 2
+once = false
+EOF
+}
+
+spoke_config a 172.30.90.2 2 10.99.0.2
+spoke_config b 172.30.90.3 3 10.99.0.3
+ip netns exec "$HUB" "$DUND" -c "$OUT/hub.conf" > "$OUT/hub.log" 2>&1 &
+echo $! > "$OUT/hub.pid"
+sleep 1
+ip netns exec "$A" "$DUND" -c "$OUT/a.conf" > "$OUT/a.log" 2>&1 &
+echo $! > "$OUT/a.pid"
+ip netns exec "$B" "$DUND" -c "$OUT/b.conf" > "$OUT/b.log" 2>&1 &
+echo $! > "$OUT/b.pid"
+
+for i in $(seq 1 20); do
+	grep -q 'Registration successful! NodeID=2' "$OUT/a.log" 2>/dev/null &&
+	grep -q 'Registration successful! NodeID=3' "$OUT/b.log" 2>/dev/null && break
+	sleep 1
+done
+grep -q 'Registration successful! NodeID=2' "$OUT/a.log"
+grep -q 'Registration successful! NodeID=3' "$OUT/b.log"
+
+direct=0
+for i in $(seq 1 25); do
+	ifa=$(ip -n "$A" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
+	ifb=$(ip -n "$B" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
+	if [ -n "$ifa" ] && [ -n "$ifb" ] &&
+	   ip netns exec "$A" "$CTL" peer-get --ifindex "$ifa" --tunnel-id 104 2>/dev/null | grep -q '"node_id": 3' &&
+	   ip netns exec "$B" "$CTL" peer-get --ifindex "$ifb" --tunnel-id 105 2>/dev/null | grep -q '"node_id": 2'; then
+		direct=1
+		break
+	fi
+	sleep 1
+done
+[ "$direct" = 1 ] || { echo "direct peers not installed" >&2; exit 1; }
+
+# Disable inner forwarding: /32 direct routes must continue to work without it.
+ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=0
+ip netns exec "$A" ping -c 3 -W 2 10.99.0.3
+ip netns exec "$B" ping -c 3 -W 2 10.99.0.2
+echo "dtun C point-to-multipoint netns regression passed"

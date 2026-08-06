@@ -1,0 +1,113 @@
+#include "dtun_proto.h"
+
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "test_proto:%d: check failed: %s\n", \
+                __LINE__, #condition); \
+        return 1; \
+    } \
+} while (0)
+
+static int same_nonce(const uint8_t *left, const uint8_t *right)
+{
+    return memcmp(left, right, DTRG_NONCE_LEN) == 0;
+}
+
+int main(void)
+{
+    uint8_t key[DTRG_KEY_LEN];
+    uint8_t nonce[DTRG_NONCE_LEN];
+    uint8_t cookie[DTRG_COOKIE_LEN];
+    uint8_t packet[DTRG_MAX_PACKET];
+    struct in_addr address, raw;
+    dtrg_msg_t message;
+    dtrg_sync_peer_t peers[2];
+    ssize_t length;
+
+    memset(key, 0x5a, sizeof(key));
+    memset(nonce, 0xa5, sizeof(nonce));
+    memset(cookie, 0x3c, sizeof(cookie));
+    CHECK(inet_pton(AF_INET, "10.99.0.2", &address) == 1);
+    CHECK(inet_pton(AF_INET, "192.0.2.2", &raw) == 1);
+
+    length = dtrg_pack_init(key, 2, address, 24, raw, nonce,
+                            packet, sizeof(packet));
+    CHECK(length > 0);
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_INIT && message.node_id == 2);
+    CHECK(message.address.s_addr == address.s_addr &&
+          message.raw.s_addr == raw.s_addr && message.prefix_len == 24);
+    CHECK(same_nonce(message.nonce, nonce));
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_challenge(key, 2, address, 24, raw, nonce, cookie,
+                                 packet, sizeof(packet));
+    CHECK(length > 0);
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_CHALLENGE &&
+          memcmp(message.cookie, cookie, sizeof(cookie)) == 0);
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_confirm(key, 2, address, 24, raw, nonce, cookie,
+                               packet, sizeof(packet));
+    CHECK(length > 0);
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_CONFIRM);
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_ack(key, 2, 100, 101, address, 24, 49000,
+                           nonce, packet, sizeof(packet));
+    CHECK(length > 0);
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_ACK && message.tunnel_id == 100 &&
+          message.remote_tunnel_id == 101 && message.data_port == 49000);
+    dtrg_msg_free(&message);
+
+    memset(peers, 0, sizeof(peers));
+    peers[0].node_id = 3;
+    peers[0].tunnel_id = 102;
+    peers[0].remote_tunnel_id = 103;
+    CHECK(inet_pton(AF_INET, "10.99.0.3", &peers[0].address) == 1);
+    CHECK(inet_pton(AF_INET, "198.51.100.3", &peers[0].raw) == 1);
+    peers[0].udp_addr = peers[0].raw;
+    peers[0].udp_port = 41003;
+    peers[1].node_id = 4;
+    peers[1].tunnel_id = 104;
+    peers[1].remote_tunnel_id = 105;
+    CHECK(inet_pton(AF_INET, "10.99.0.4", &peers[1].address) == 1);
+    CHECK(inet_pton(AF_INET, "203.0.113.4", &peers[1].raw) == 1);
+    peers[1].udp_addr = peers[1].raw;
+    peers[1].udp_port = 41004;
+    length = dtrg_pack_sync(key, 2, nonce, peers, 2,
+                            packet, sizeof(packet));
+    CHECK(length > 0);
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_SYNC && message.peer_count == 2);
+    CHECK(message.peers[0].node_id == 3 &&
+          message.peers[0].tunnel_id == 102 &&
+          message.peers[0].remote_tunnel_id == 103 &&
+          message.peers[0].udp_port == 41003);
+    CHECK(message.peers[1].node_id == 4 &&
+          message.peers[1].address.s_addr == peers[1].address.s_addr);
+    dtrg_msg_free(&message);
+
+    packet[12] ^= 1;
+    CHECK(dtrg_parse(key, packet, (size_t)length, &message) < 0);
+    dtrg_msg_free(&message);
+    packet[12] ^= 1;
+    CHECK(dtrg_parse(key, packet, (size_t)length - 1, &message) < 0);
+    dtrg_msg_free(&message);
+    CHECK(dtrg_pack_sync(key, 2, nonce, peers,
+                         DTRG_MAX_SYNC_PEERS + 1,
+                         packet, sizeof(packet)) < 0);
+    CHECK(dtrg_pack_sync(key, 2, nonce, peers, 2,
+                         packet, 32) < 0);
+
+    puts("C registration protocol tests passed");
+    return 0;
+}

@@ -1,0 +1,21 @@
+# Linux external-module build output
+*.ko
+*.mod
+*.mod.c
+*.o
+.*.cmd
+Module.symvers
+modules.order
+
+# Locally built control tools and unit-test binaries
+/bin/dtund
+/bin/dtunctl
+/tests/test_proto
+/tests/test_daemon_state
+
+# Python and test output
+__pycache__/
+*.py[cod]
+*.log
+*.out
+iperf_output.txt
