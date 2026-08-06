@@ -143,6 +143,7 @@ extern struct list_head dtun_devices;
 
 struct dtun_dev *dtun_dev_by_ifindex(struct net *net, int ifindex);
 struct dtun_peer *dtun_peer_by_id(struct dtun_dev *d, u32 tunnel_id);
+struct dtun_peer *dtun_peer_by_node(struct dtun_dev *d, u64 node_id);
 void dtun_peer_free(struct dtun_peer *peer);
 void dtun_peer_put(struct dtun_peer *peer);
 int dtun_peer_set_key(struct dtun_peer *peer, const u8 *key, size_t len);

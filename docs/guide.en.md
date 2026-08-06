@@ -245,7 +245,7 @@ network disruption.
 The kernel's actual transmit order is:
 
 ```text
-Raw candidate seen valid within 15 seconds → any configured direct UDP endpoint → interface Hub endpoint
+Raw candidate seen valid within 15 seconds → direct UDP endpoint validated within 15 seconds (hole punch OK) → interface Hub endpoint (fallback on punch failure)
 ```
 
 `udp_up` is observational and is not currently a gate for UDP transmission. The

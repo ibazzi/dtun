@@ -108,10 +108,10 @@ The actual DATA selection rules are:
 
 1. Choose Raw IPv4 253 if `raw_addr` is nonzero and `raw_seen` is less than
    15 seconds old.
-2. Otherwise choose direct UDP whenever `udp_addr` and `udp_port` are nonzero;
-   `udp_seen` is not checked.
-3. Otherwise use the link's `hub_addr` and `hub_port`; transmission fails if the
-   endpoint is empty.
+2. Otherwise choose direct UDP whenever `udp_addr` and `udp_port` are nonzero and
+   `udp_seen` is less than 15 seconds old (hole punching succeeded).
+3. Otherwise fall back to the link's `hub_addr` and `hub_port` for Hub relay when
+   direct UDP hole punching fails or times out.
 
 Thus, `raw_up` affects path selection while `udp_up` is currently status only.
 The so-called relay is also only a destination-endpoint fallback: the original

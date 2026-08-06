@@ -90,8 +90,8 @@ HMAC 和路径选择。
 DATA 的实际选择规则为：
 
 1. `raw_addr` 非零，且 `raw_seen` 距当前不足 15 秒：选择 Raw IPv4 253；
-2. 否则只要 `udp_addr` 和 `udp_port` 非零：选择直连 UDP，不检查 `udp_seen`；
-3. 否则使用接口的 `hub_addr`/`hub_port`；端点为空时发送失败。
+2. 否则 `udp_addr` 和 `udp_port` 非零，且 `udp_seen` 距当前不足 15 秒（直连打洞成功）：选择直连 UDP；
+3. 否则使用接口的 `hub_addr`/`hub_port` 发送至 Hub 中转（打洞未成功或直连断开时自动回退至 Hub 中转）。
 
 因此 `raw_up` 参与路径选择，而 `udp_up` 当前只是状态输出。所谓 relay 也只是目的
 端点回退：原始 node 和 tunnel ID 不变，Hub 不会为任意直连会话解包或重写该帧。

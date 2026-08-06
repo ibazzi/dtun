@@ -64,23 +64,45 @@ static struct dtun_peer *dtun_peer_get_by_id(struct dtun_dev *d, u32 tunnel_id)
 	return peer;
 }
 
+static struct dtun_peer *dtun_peer_get_by_node(struct dtun_dev *d, u64 node_id)
+{
+	struct dtun_peer *peer;
+
+	spin_lock_bh(&d->peer_lock);
+	peer = dtun_peer_by_node(d, node_id);
+	if (peer)
+		refcount_inc(&peer->refs);
+	spin_unlock_bh(&d->peer_lock);
+	return peer;
+}
+
 static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
 			__be16 port, enum dtun_transport transport)
 {
 	struct dtun_hdr *hdr;
 	struct dtun_peer *peer = NULL;
 	u8 tag[DTUN_TAG_LEN];
+	u64 src_node, dst_node;
 	int err;
 
 	if (!pskb_may_pull(skb, sizeof(*hdr)))
 		goto drop;
 	hdr = (struct dtun_hdr *)skb->data;
 	if (hdr->version != DTUN_VERSION || hdr->type < DTUN_FRAME_DATA ||
-	    hdr->type > DTUN_FRAME_KEEPALIVE ||
-	    hdr->dst_node != cpu_to_be64(d->node_id))
+	    hdr->type > DTUN_FRAME_KEEPALIVE)
 		goto drop;
-	peer = dtun_peer_get_by_id(d, ntohl(hdr->dst_tunnel_id));
-	if (!peer || peer->node_id != be64_to_cpu(hdr->src_node))
+	src_node = be64_to_cpu(hdr->src_node);
+	dst_node = be64_to_cpu(hdr->dst_node);
+	if (dst_node != d->node_id) {
+		if (d->node_id != 1)
+			goto drop;
+		peer = dtun_peer_get_by_node(d, src_node);
+	} else {
+		peer = dtun_peer_get_by_id(d, ntohl(hdr->dst_tunnel_id));
+		if (!peer || peer->node_id != src_node)
+			goto drop;
+	}
+	if (!peer)
 		goto drop;
 	/*
 	 * A spoke behind NAT cannot know the public source port selected by its
@@ -285,7 +307,8 @@ static enum dtun_transport dtun_choose_path(struct dtun_dev *d,
 		spin_unlock_bh(&peer->state_lock);
 		return DTUN_TRANSPORT_RAW;
 	}
-	if (peer->udp_addr && peer->udp_port) {
+	if (peer->udp_addr && peer->udp_port &&
+	    time_before(jiffies, peer->udp_seen + DTUN_PATH_TIMEOUT)) {
 		*addr = peer->udp_addr;
 		*port = peer->udp_port;
 		spin_unlock_bh(&peer->state_lock);
@@ -822,6 +845,16 @@ struct dtun_peer *dtun_peer_by_id(struct dtun_dev *d, u32 tunnel_id)
 
 	list_for_each_entry(peer, &d->peers, list)
 		if (peer->tunnel_id == tunnel_id)
+			return peer;
+	return NULL;
+}
+
+struct dtun_peer *dtun_peer_by_node(struct dtun_dev *d, u64 node_id)
+{
+	struct dtun_peer *peer;
+
+	list_for_each_entry(peer, &d->peers, list)
+		if (peer->node_id == node_id)
 			return peer;
 	return NULL;
 }
