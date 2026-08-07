@@ -32,6 +32,16 @@ make KDIR=/lib/modules/$(uname -r)/build
 sudo insmod ./dtun.ko
 ```
 
+在 Debian/Ubuntu 上可使用 DKMS 安装包，避免把编译机内核版本绑定进安装包：
+
+```sh
+make deb
+sudo apt install ./build/dtun_*.deb
+sudo modprobe dtun
+```
+
+目标机器需要安装与当前内核匹配的 headers。内核升级后，DKMS 会自动重新编译模块。
+
 构建结果包括 `dtun.ko`、`bin/dtund` 和 `bin/dtunctl`。确认模块已加载：
 
 ```sh

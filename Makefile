@@ -85,7 +85,7 @@ check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR
 		tests/ha-real/run.sh tests/ha-real/cleanup.sh \
 		tests/ha-real/node-netns.sh
 
-deb: all
+deb: ctools
 	./debian/rules binary
 
 compat-build:

@@ -51,6 +51,17 @@ make KDIR=/lib/modules/$(uname -r)/build
 sudo insmod ./dtun.ko
 ```
 
+在 Debian/Ubuntu 上也可以构建 DKMS 安装包。安装包不携带打包机编译出的
+`dtun.ko`，而是在目标服务器安装时针对当前内核编译：
+
+```sh
+make deb
+sudo apt install ./build/dtun_*.deb
+sudo modprobe dtun
+```
+
+目标服务器需要安装与当前内核匹配的 headers；内核升级后，DKMS 会自动重新构建模块。
+
 为 Hub 和 Spoke 分发同一个 32 字节随机 PSK，并限制配置文件权限：
 
 ```sh

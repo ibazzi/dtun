@@ -58,6 +58,19 @@ make KDIR=/lib/modules/$(uname -r)/build
 sudo insmod ./dtun.ko
 ```
 
+On Debian/Ubuntu, you can also build a DKMS package. The package does not ship
+a `dtun.ko` built on the packaging host; DKMS builds it for the target
+server's running kernel during installation:
+
+```sh
+make deb
+sudo apt install ./build/dtun_*.deb
+sudo modprobe dtun
+```
+
+The target server needs headers matching its kernel. DKMS will rebuild the
+module automatically when the kernel is upgraded.
+
 Distribute the same random 32-byte PSK to the Hub and every Spoke, and restrict
 configuration-file permissions:
 

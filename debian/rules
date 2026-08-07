@@ -3,25 +3,30 @@
 %:
 	dh $@ --without dwz,strip
 
+DTUN_VERSION := $(shell dpkg-parsechangelog -S Version | sed 's/-[^-]*$$//')
+DTUN_DKMS_DIR := debian/dtun/usr/src/dtun-$(DTUN_VERSION)
+
 override_dh_testroot:
 
 override_dh_auto_build:
-	make all
+	make ctools
 
 override_dh_auto_test:
 	make check
 
 override_dh_auto_install:
 	mkdir -p debian/dtun/usr/bin
-	mkdir -p debian/dtun/lib/modules/$(shell uname -r)/extra
 	mkdir -p debian/dtun/etc/dtun
 	mkdir -p debian/dtun/lib/systemd/system
+	mkdir -p $(DTUN_DKMS_DIR)/src
 	cp -f build/dtund debian/dtun/usr/bin/
 	cp -f build/dtunctl debian/dtun/usr/bin/
-	cp -f build/dtun.ko debian/dtun/lib/modules/$(shell uname -r)/extra/
 	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun-example.conf
 	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun.conf
 	cp -f debian/dtund.service debian/dtun/lib/systemd/system/dtund.service
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/dkms.conf.in > $(DTUN_DKMS_DIR)/dkms.conf
+	cp -f Kbuild $(DTUN_DKMS_DIR)/
+	cp -f src/dtun.h src/dtun_main.c src/dtun_netlink.c $(DTUN_DKMS_DIR)/src/
 
 override_dh_fixperms:
 	chmod -R a+rX debian/dtun
@@ -33,9 +38,10 @@ override_dh_strip:
 
 override_dh_installdeb:
 	mkdir -p debian/dtun/DEBIAN
-	cp -f debian/postinst debian/dtun/DEBIAN/postinst
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/postinst.in > debian/dtun/DEBIAN/postinst
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/prerm.in > debian/dtun/DEBIAN/prerm
 	cp -f debian/postrm debian/dtun/DEBIAN/postrm
-	chmod 0755 debian/dtun/DEBIAN/postinst debian/dtun/DEBIAN/postrm
+	chmod 0755 debian/dtun/DEBIAN/postinst debian/dtun/DEBIAN/prerm debian/dtun/DEBIAN/postrm
 	chmod -R a+rX debian/dtun
 
 override_dh_gencontrol:

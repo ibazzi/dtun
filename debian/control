@@ -8,7 +8,7 @@ Homepage: https://github.com/dtun/dtun
 
 Package: dtun
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: dkms, ${shlibs:Depends}, ${misc:Depends}
 Description: Dual transport authenticated L3 tunnel daemon and kernel module
  dtun provides authenticated layer-3 mesh tunnels over dual UDP/Raw transports.
- Includes the dtun kernel module, control utilities, and background daemon.
+ Includes the dtun DKMS kernel module, control utilities, and background daemon.

@@ -36,6 +36,18 @@ make KDIR=/lib/modules/$(uname -r)/build
 sudo insmod ./dtun.ko
 ```
 
+On Debian/Ubuntu, use the DKMS package to avoid binding the package to the
+kernel version of the build host:
+
+```sh
+make deb
+sudo apt install ./build/dtun_*.deb
+sudo modprobe dtun
+```
+
+The target machine needs headers matching its running kernel. DKMS will rebuild
+the module automatically after a kernel upgrade.
+
 The build produces `dtun.ko`, `bin/dtund`, and `bin/dtunctl`. Confirm that the
 module is loaded:
 

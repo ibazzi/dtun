@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+MODULE=dtun
+VERSION=@VERSION@
+
+if [ "$1" = "configure" ]; then
+    if ! command -v dkms >/dev/null 2>&1; then
+        echo "[dtun] dkms is required to build the kernel module" >&2
+        exit 1
+    fi
+
+    echo "[dtun] Registering the kernel module with DKMS..."
+    dkms add -m "$MODULE" -v "$VERSION" >/dev/null 2>&1 || true
+
+    echo "[dtun] Building the kernel module for $(uname -r)..."
+    dkms build -m "$MODULE" -v "$VERSION" -k "$(uname -r)" --force
+    dkms install -m "$MODULE" -v "$VERSION" -k "$(uname -r)" --force
+    depmod -a || true
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0
