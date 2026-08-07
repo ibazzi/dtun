@@ -88,6 +88,9 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
 | `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
 | `psk` | 无 | 32 字节 PSK 的 64 位十六进制表示；省略仅供不安全测试 |
+| `syslog` | `false` | 是否将日志输出对接至 syslog（也可通过命令行 `--syslog` 或 `-s` 开启） |
+| `syslog_ident` | `dtund` | syslog 标识符（也可由 `--syslog-ident` 覆盖） |
+| `syslog_facility` | `daemon` | syslog facility（`daemon`、`user`、`local0`~`local7` 等；也可由 `--syslog-facility` 覆盖） |
 | `raw_transport` | `true` | 设为 `false` 时禁用 Raw IPv4候选，只使用 UDP及 Hub回退；适合 Raw探测假阳性的云网络 |
 
 ### `[hub]`

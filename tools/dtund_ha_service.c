@@ -1,3 +1,4 @@
+#include "dtun_log.h"
 #include "dtund_ha_service.h"
 #include "dtun_ha_proto.h"
 #include "dtun_ha_state.h"
@@ -102,7 +103,7 @@ static void *service_thread(void *argument)
             if(add_joined_member(&state,&peer,s->ha_port,s->control_port,s->data_port)==0)
                 dtun_ha_state_save(s->state_path,&state);
             char text[INET_ADDRSTRLEN];inet_ntop(AF_INET,&peer.observed_address,text,sizeof(text));
-            printf("[dtund HA] Enrolled learner %s from %s\n",peer.hub_id,text);fflush(stdout);
+            dtun_log_info("[dtund HA] Enrolled learner %s from %s", peer.hub_id, text);
         }
         dtun_ha_state_unlock(state_lock);close(fd);
     }
@@ -113,16 +114,16 @@ int dtund_ha_service_start(dtund_ha_service_t **out,const dtun_config_t*c)
 {
     dtund_ha_service_t*s;struct sockaddr_in address;int one=1;
     if(!c->ha_enabled)return 0;
-    if(!c->ha_identity_key||!c->ha_state_file||!c->ha_hub_id){fprintf(stderr,"incomplete HA configuration\n");return-1;}
+    if(!c->ha_identity_key||!c->ha_state_file||!c->ha_hub_id){dtun_log_err("incomplete HA configuration");return-1;}
     if(c->ha_format_version!=DTUN_HA_CONFIG_VERSION){
-        fprintf(stderr,"unsupported HA configuration format_version=%d; re-run dtunctl ha init\n",c->ha_format_version);
+        dtun_log_err("unsupported HA configuration format_version=%d; re-run dtunctl ha init", c->ha_format_version);
         return-1;
     }
     if(dtun_ha_validate_hub_id(c->ha_hub_id)<0||!c->ha_role||
        (strcmp(c->ha_role,"primary")&&strcmp(c->ha_role,"backup"))||
        c->ha_port<1||c->ha_port>65535||c->failover_timeout<1||
        !c->failback||(strcmp(c->failback,"immediate")&&strcmp(c->failback,"sticky"))||
-       c->recovery_stable_time<1||c->min_backup_active_time<0){fprintf(stderr,"invalid HA role, port, timer, or failback policy\n");return-1;}
+       c->recovery_stable_time<1||c->min_backup_active_time<0){dtun_log_err("invalid HA role, port, timer, or failback policy");return-1;}
     s=calloc(1,sizeof(*s));if(!s)return-1;s->listener=-1;
     s->ha_port=(uint16_t)c->ha_port;s->control_port=(uint16_t)c->bind_port;
     s->data_port=(uint16_t)c->data_port;
@@ -144,7 +145,7 @@ int dtund_ha_service_start(dtund_ha_service_t **out,const dtun_config_t*c)
     memset(&address,0,sizeof(address));address.sin_family=AF_INET;address.sin_addr.s_addr=INADDR_ANY;address.sin_port=htons((uint16_t)c->ha_port);
     if(bind(s->listener,(struct sockaddr*)&address,sizeof(address))<0||listen(s->listener,16)<0)goto fail;
     if(pthread_create(&s->thread,NULL,service_thread,s)!=0)goto fail;
-    *out=s;printf("[dtund HA] Enrollment service listening on 0.0.0.0:%d\n",c->ha_port);return 0;
+    *out=s;dtun_log_info("[dtund HA] Enrollment service listening on 0.0.0.0:%d", c->ha_port);return 0;
 fail:if(s->listener>=0)close(s->listener);pthread_cond_destroy(&s->replicated);pthread_mutex_destroy(&s->lock);free(s);return-1;
 }
 
@@ -168,7 +169,7 @@ int dtund_ha_standby_step(const dtun_config_t*c,time_t*last_seen)
     if(state.member_count==2&&local->role==DTUN_HA_VOTER&&now-*last_seen>=c->failover_timeout){
         state.term++;state.commit_index++;snprintf(state.leader_id,sizeof(state.leader_id),"%s",state.local_hub_id);
         if(dtun_ha_state_save(c->ha_state_file,&state)<0)return-1;
-        printf("[dtund HA] Primary unavailable for %ds; direct-pair takeover at term %llu\n",c->failover_timeout,(unsigned long long)state.term);fflush(stdout);return 1;
+        dtun_log_info("[dtund HA] Primary unavailable for %ds; direct-pair takeover at term %llu", c->failover_timeout, (unsigned long long)state.term);return 1;
     }
     if(state.member_count>=3&&local->role==DTUN_HA_VOTER&&now-*last_seen>=c->failover_timeout){
         uint32_t voters=0,votes=1,higher=0;uint64_t term;
@@ -186,7 +187,7 @@ int dtund_ha_standby_step(const dtun_config_t*c,time_t*last_seen)
         }
         if(votes>voters/2){state.commit_index++;snprintf(state.leader_id,sizeof(state.leader_id),"%s",state.local_hub_id);if(dtun_ha_state_save(c->ha_state_file,&state)<0)return-1;
             for(uint32_t i=0;i<state.member_count;i++){dtun_ha_member_t*m=&state.members[i];if(m->enabled&&m->role==DTUN_HA_VOTER&&strcmp(m->hub_id,state.local_hub_id)&&m->address.s_addr)(void)dtun_ha_announce_leader(m->address,m->ha_port,&state,m,c->ha_identity_key);}
-            printf("[dtund HA] Won quorum election term %llu with %u/%u votes\n",(unsigned long long)term,votes,voters);fflush(stdout);return 1;}
+            dtun_log_info("[dtund HA] Won quorum election term %llu with %u/%u votes", (unsigned long long)term, votes, voters);return 1;}
     }
     return 0;
 }
@@ -270,7 +271,7 @@ int dtund_ha_recover_primary_step(const dtun_config_t*c,time_t*stable_since)
         state.term=term;state.commit_index++;state.voted_term=term;state.failback_requested=0;state.failback_force=0;snprintf(state.voted_for,sizeof(state.voted_for),"%s",state.local_hub_id);snprintf(state.leader_id,sizeof(state.leader_id),"%s",state.local_hub_id);
         if(dtun_ha_state_save(c->ha_state_file,&state)<0)return-1;
         for(uint32_t i=0;i<state.member_count;i++){dtun_ha_member_t*m=&state.members[i];if(m->enabled&&strcmp(m->hub_id,state.local_hub_id)&&m->address.s_addr)(void)dtun_ha_announce_leader(m->address,m->ha_port,&state,m,c->ha_identity_key);}
-        printf("[dtund HA] Recovery stable; preferred primary resumes at term %llu\n",(unsigned long long)term);fflush(stdout);return 1;
+        dtun_log_info("[dtund HA] Recovery stable; preferred primary resumes at term %llu", (unsigned long long)term);return 1;
     }
     *stable_since=0;return 0;
 }

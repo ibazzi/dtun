@@ -102,6 +102,9 @@ name; the section assignments below are conventions for supported configs.
 | `node_id` | `0` | A Hub must use 1 (0 falls back to 1); on a Spoke, 0 requests temporary allocation and 1 is reserved |
 | `address` | `0.0.0.0/24` | Inner IPv4/CIDR; a zero Spoke address requests pool allocation |
 | `psk` | none | 64-hex-digit representation of a 32-byte PSK; omission is insecure test mode |
+| `syslog` | `false` | Enable syslog output (can also be enabled via `--syslog` or `-s`) |
+| `syslog_ident` | `dtund` | Syslog tag/identifier (can be overridden via `--syslog-ident`) |
+| `syslog_facility` | `daemon` | Syslog facility (`daemon`, `user`, `local0`~`local7`, etc.; can be overridden via `--syslog-facility`) |
 
 ### `[hub]`
 

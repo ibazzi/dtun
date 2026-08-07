@@ -1,4 +1,5 @@
 #include "dtun_netlink.h"
+#include "dtun_log.h"
 #include "dtun_uapi.h"
 
 #include <stdio.h>
@@ -620,8 +621,7 @@ int dtun_module_ensure_loaded(void) {
         return 0;
     }
 
-    printf("[dtund] Kernel module 'dtun' is not loaded, attempting to load...\n");
-    fflush(stdout);
+    dtun_log_info("[dtund] Kernel module 'dtun' is not loaded, attempting to load...");
 
     int ret = system("modprobe dtun 2>/dev/null");
     if (ret != 0 || access("/sys/module/dtun", F_OK) != 0) {
@@ -630,12 +630,11 @@ int dtun_module_ensure_loaded(void) {
 
     if (access("/sys/module/dtun", F_OK) == 0) {
         dtun_module_loaded_here = 1;
-        printf("[dtund] Kernel module 'dtun' loaded successfully.\n");
-        fflush(stdout);
+        dtun_log_info("[dtund] Kernel module 'dtun' loaded successfully.");
         return 0;
     }
 
-    fprintf(stderr, "[dtund] Error: Failed to load kernel module 'dtun'. Please ensure dtun.ko is installed or present.\n");
+    dtun_log_err("[dtund] Error: Failed to load kernel module 'dtun'. Please ensure dtun.ko is installed or present.");
     return -1;
 }
 
@@ -644,8 +643,7 @@ void dtun_module_unload_if_needed(void) {
         return;
     }
 
-    printf("[dtund] Unloading kernel module 'dtun'...\n");
-    fflush(stdout);
+    dtun_log_info("[dtund] Unloading kernel module 'dtun'...");
 
     int ret = system("modprobe -r dtun 2>/dev/null");
     if (ret != 0) {

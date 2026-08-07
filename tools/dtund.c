@@ -1,3 +1,4 @@
+#include "dtun_log.h"
 #include "../../src/ctl/dtun_netlink.h"
 #include "../../src/ctl/dtun_proto.h"
 #include "../../src/ctl/ini_parser.h"
@@ -138,11 +139,11 @@ static int parse_psk(const char *hex, uint8_t out[32])
 
     memset(out, 0, 32);
     if (!hex || !*hex) {
-        printf("[dtund] PSK not specified: Zero-HMAC development mode enabled.\n");
+        dtun_log_info("[dtund] PSK not specified: Zero-HMAC development mode enabled.");
         return 0;
     }
     if (strlen(hex) != 64) {
-        fprintf(stderr, "Error: psk must be 64 hexadecimal characters\n");
+        dtun_log_err("Error: psk must be 64 hexadecimal characters");
         return -1;
     }
     for (i = 0; i < 32; i++) {
@@ -153,7 +154,7 @@ static int parse_psk(const char *hex, uint8_t out[32])
         errno = 0;
         value = (unsigned int)strtoul(byte, &end, 16);
         if (errno || !end || *end || value > 255) {
-            fprintf(stderr, "Error: psk contains non-hexadecimal characters\n");
+            dtun_log_err("Error: psk contains non-hexadecimal characters");
             return -1;
         }
         out[i] = (uint8_t)value;
@@ -347,7 +348,7 @@ static void hub_state_init(void)
     g_hub_state.next_node_id = 2;
     g_hub_state.candidate_epoch = 1;
     if (RAND_bytes(g_hub_state.cookie_key, sizeof(g_hub_state.cookie_key)) != 1) {
-        fprintf(stderr, "Failed to generate Hub cookie key\n");
+        dtun_log_err("Failed to generate Hub cookie key");
         exit(1);
     }
 }
@@ -362,12 +363,12 @@ static int hub_load_state(const char *path)
             hub_state_init();
             return 0;
         }
-        perror("Hub state stat failed");
+        dtun_log_err("Hub state stat failed: %s", strerror(errno));
         return -1;
     }
     file = fopen(path, "rb");
     if (!file) {
-        perror("Hub state open failed");
+        dtun_log_err("Hub state open failed: %s", strerror(errno));
         return -1;
     }
     memset(g_hub_changes, 0, sizeof(g_hub_changes));
@@ -379,7 +380,7 @@ static int hub_load_state(const char *path)
             memcmp(g_hub_state.magic, HUB_STATE_MAGIC, 4) != 0 ||
             g_hub_state.version != HUB_STATE_FORMAT) {
             fclose(file);
-            fprintf(stderr, "Invalid or unsupported Hub state header\n");
+            dtun_log_err("Invalid or unsupported Hub state header");
             return -1;
         }
     } else if ((size_t)st.st_size == sizeof(legacy_hub_state_t)) {
@@ -388,13 +389,13 @@ static int hub_load_state(const char *path)
 
         if (fread(&legacy, sizeof(legacy), 1, file) != 1) {
             fclose(file);
-            fprintf(stderr, "Truncated legacy Hub state\n");
+            dtun_log_err("Truncated legacy Hub state");
             return -1;
         }
         hub_state_init();
         if (legacy.node_count < 0 || legacy.node_count > MAX_PEERS) {
             fclose(file);
-            fprintf(stderr, "Invalid legacy Hub node count\n");
+            dtun_log_err("Invalid legacy Hub node count");
             return -1;
         }
         count = (uint32_t)legacy.node_count;
@@ -416,7 +417,7 @@ static int hub_load_state(const char *path)
             dst->last_seen = src->last_seen;
             dst->generation = 1;
         }
-        printf("[dtund Hub] Imported legacy state with %u nodes\n", count);
+        dtun_log_info("[dtund Hub] Imported legacy state with %u nodes", count);
     } else {
         fclose(file);
         fprintf(stderr, "Unsupported Hub state size: %lld bytes\n",
@@ -427,7 +428,7 @@ static int hub_load_state(const char *path)
     if (g_hub_state.node_count > MAX_PEERS ||
         g_hub_state.session_count > MAX_SESSIONS ||
         !g_hub_state.next_tunnel_id || g_hub_state.next_node_id < 2) {
-        fprintf(stderr, "Hub state contains invalid counters\n");
+        dtun_log_err("Hub state contains invalid counters");
         return -1;
     }
     return 0;
@@ -443,12 +444,12 @@ static int hub_save_state(const char *path)
     if (make_parent_dirs(path) < 0 ||
         snprintf(temporary, sizeof(temporary), "%s.tmp", path) >=
         (int)sizeof(temporary)) {
-        fprintf(stderr, "Invalid Hub state path\n");
+        dtun_log_err("Invalid Hub state path");
         return -1;
     }
     file = fopen(temporary, "wb");
     if (!file) {
-        perror("Hub state temporary open failed");
+        dtun_log_err("Hub state temporary open failed: %s", strerror(errno));
         return -1;
     }
     fd = fileno(file);
@@ -459,12 +460,12 @@ static int hub_save_state(const char *path)
     if (fclose(file) != 0)
         failed = 1;
     if (failed) {
-        perror("Hub state write failed");
+        dtun_log_err("Hub state write failed: %s", strerror(errno));
         unlink(temporary);
         return -1;
     }
     if (rename(temporary, path) < 0) {
-        perror("Hub state rename failed");
+        dtun_log_err("Hub state rename failed: %s", strerror(errno));
         unlink(temporary);
         return -1;
     }
@@ -498,7 +499,7 @@ static int hub_validate_state(const dtun_config_t *config,
     uint64_t max_node_id = 1;
 
     if (parse_cidr(config->pool, &pool, &pool_prefix) < 0) {
-        fprintf(stderr, "Invalid Hub pool: %s\n", config->pool);
+        dtun_log_err("Invalid Hub pool: %s", config->pool);
         return -1;
     }
     pool = network_prefix(pool, pool_prefix);
@@ -508,7 +509,7 @@ static int hub_validate_state(const dtun_config_t *config,
         ntohl(hub_address.s_addr) == ntohl(pool.s_addr) ||
         ntohl(hub_address.s_addr) ==
             (ntohl(pool.s_addr) | ~prefix_mask(pool_prefix))) {
-        fprintf(stderr, "Hub inner address is not usable in the configured pool\n");
+        dtun_log_err("Hub inner address is not usable in the configured pool");
         return -1;
     }
     for (i = 0; i < g_hub_state.node_count; i++) {
@@ -518,7 +519,7 @@ static int hub_validate_state(const dtun_config_t *config,
             record->tunnel_id == record->hub_tunnel_id ||
             record->prefix_len != pool_prefix ||
             !address_is_usable(record->address, pool_prefix, pool, hub_address)) {
-            fprintf(stderr, "Invalid persisted Hub node record at index %u\n", i);
+            dtun_log_err("Invalid persisted Hub node record at index %u", i);
             return -1;
         }
         for (j = 0; j < i; j++) {
@@ -527,14 +528,14 @@ static int hub_validate_state(const dtun_config_t *config,
                 record->address.s_addr == other->address.s_addr ||
                 record->tunnel_id == other->tunnel_id ||
                 record->hub_tunnel_id == other->hub_tunnel_id) {
-                fprintf(stderr, "Duplicate persisted Hub node record at index %u\n", i);
+                dtun_log_err("Duplicate persisted Hub node record at index %u", i);
                 return -1;
             }
         }
         for (j = 0; j < id_count; j++)
             if (ids[j] == record->tunnel_id ||
                 ids[j] == record->hub_tunnel_id) {
-                fprintf(stderr, "Duplicate persisted tunnel ID at node index %u\n", i);
+                dtun_log_err("Duplicate persisted tunnel ID at node index %u", i);
                 return -1;
             }
         ids[id_count++] = record->tunnel_id;
@@ -550,7 +551,7 @@ static int hub_validate_state(const dtun_config_t *config,
             session->first_node <= 1 || !session->first_tunnel_id ||
             !session->second_tunnel_id ||
             session->first_tunnel_id == session->second_tunnel_id) {
-            fprintf(stderr, "Invalid persisted Hub session at index %u\n", i);
+            dtun_log_err("Invalid persisted Hub session at index %u", i);
             return -1;
         }
         for (j = 0; j < g_hub_state.node_count; j++) {
@@ -560,19 +561,19 @@ static int hub_validate_state(const dtun_config_t *config,
                 second_found = 1;
         }
         if (!first_found || !second_found) {
-            fprintf(stderr, "Persisted session references an unknown node\n");
+            dtun_log_err("Persisted session references an unknown node");
             return -1;
         }
         for (j = 0; j < i; j++)
             if (g_hub_state.sessions[j].first_node == session->first_node &&
                 g_hub_state.sessions[j].second_node == session->second_node) {
-                fprintf(stderr, "Duplicate persisted Hub session pair\n");
+                dtun_log_err("Duplicate persisted Hub session pair");
                 return -1;
             }
         for (j = 0; j < id_count; j++)
             if (ids[j] == session->first_tunnel_id ||
                 ids[j] == session->second_tunnel_id) {
-                fprintf(stderr, "Duplicate persisted session tunnel ID\n");
+                dtun_log_err("Duplicate persisted session tunnel ID");
                 return -1;
             }
         ids[id_count++] = session->first_tunnel_id;
@@ -583,7 +584,7 @@ static int hub_validate_state(const dtun_config_t *config,
             max_tunnel_id = session->second_tunnel_id;
     }
     if (max_tunnel_id == UINT32_MAX || max_node_id == UINT64_MAX) {
-        fprintf(stderr, "Persisted Hub identifier space is exhausted\n");
+        dtun_log_err("Persisted Hub identifier space is exhausted");
         return -1;
     }
     if (g_hub_state.next_tunnel_id <= max_tunnel_id)
@@ -1009,7 +1010,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
 
     if (inet_pton(AF_INET, config->local_outer_ip, &outer_address) != 1 ||
         parse_cidr(config->address, &inner_address, &prefix_len) < 0) {
-        fprintf(stderr, "Invalid Hub outer or inner address\n");
+        dtun_log_err("Invalid Hub outer or inner address");
         return 1;
     }
     if (hub_load_state(config->state_file) < 0 ||
@@ -1043,14 +1044,13 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                                        (uint32_t)config->probe_interval_ms,
                                        (uint32_t)config->path_timeout_ms);
     if (created_ifindex <= 0) {
-        fprintf(stderr, "Failed to create Hub interface %s: %s\n",
-                config->interface, strerror(-created_ifindex));
+        dtun_log_err("Failed to create Hub interface %s: %s", config->interface, strerror(-created_ifindex));
         return 1;
     }
     ifindex = (uint32_t)created_ifindex;
     if (dtun_link_setup(ifindex, config->interface,
                                     inner_address, prefix_len) < 0) {
-        fprintf(stderr, "Failed to create Hub interface %s\n", config->interface);
+        dtun_log_err("Failed to create Hub interface %s", config->interface);
         return 1;
     }
     /* Restore persisted online peers before accepting REFRESH.  This lets an
@@ -1090,12 +1090,11 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     bind_address.sin_port = htons((uint16_t)config->bind_port);
     if (inet_pton(AF_INET, config->bind_address, &bind_address.sin_addr) != 1 ||
         bind(sock, (struct sockaddr *)&bind_address, sizeof(bind_address)) < 0) {
-        perror("Hub control socket bind failed");
+        dtun_log_err("Hub control socket bind failed: %s", strerror(errno));
         close(sock);
         goto fail_link;
     }
-    printf("[dtund] Hub listening on %s:%d (DTRG)\n",
-           config->bind_address, config->bind_port);
+    dtun_log_info("[dtund] Hub listening on %s:%d (DTRG)", config->bind_address, config->bind_port);
     fflush(stdout);
     while (g_running) {
         if (config->ha_enabled) {
@@ -1111,8 +1110,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                     state.commit_index++;
                     (void)dtun_ha_state_save(config->ha_state_file, &state);
                 }
-                printf("[dtund HA] Local Hub demoted by term %llu leader %s\n",
-                       (unsigned long long)state.term, state.leader_id);
+                dtun_log_info("[dtund HA] Local Hub demoted by term %llu leader %s", (unsigned long long)state.term, state.leader_id);
                 fflush(stdout);
                 demoted = 1;
                 break;
@@ -1225,7 +1223,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 if (program_peer(&peer) < 0 ||
                     program_route(ifindex, record->hub_tunnel_id,
                                   record->address, 32) < 0) {
-                    fprintf(stderr, "[dtund Hub] Failed to program registered peer\n");
+                    dtun_log_err("[dtund Hub] Failed to program registered peer");
                     dtrg_msg_free(&message);
                     continue;
                 }
@@ -1523,7 +1521,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         inet_pton(AF_INET, config->hub_address, &hub_control.sin_addr) != 1 ||
         parse_cidr(config->address, &requested_address,
                    &requested_prefix) < 0) {
-        fprintf(stderr, "Invalid Spoke Hub or inner address\n");
+        dtun_log_err("Invalid Spoke Hub or inner address");
         return 1;
     }
     if (config->fast_recovery && strcmp(config->local_outer_ip, "0.0.0.0")) {
@@ -1533,7 +1531,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     }
     if (config->probe_interval_ms < 100 || config->path_timeout_ms < 500 ||
         config->path_timeout_ms < 2 * config->probe_interval_ms) {
-        fprintf(stderr, "invalid probe/path timeout configuration\n");
+        dtun_log_err("invalid probe/path timeout configuration");
         return 1;
     }
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -1543,7 +1541,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     local_address.sin_port = htons((uint16_t)config->local_port);
     local_address.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&local_address, sizeof(local_address)) < 0) {
-        perror("Spoke control socket bind failed");
+        dtun_log_err("Spoke control socket bind failed: %s", strerror(errno));
         goto out;
     }
     hub_control.sin_family = AF_INET;
@@ -1556,8 +1554,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     if (dtun_module_ensure_loaded() < 0)
         return 1;
 
-    printf("[dtund] Spoke registering with %s:%d (DTRG)\n",
-           config->hub_address, config->hub_port);
+    dtun_log_info("[dtund] Spoke registering with %s:%d (DTRG)", config->hub_address, config->hub_port);
     fflush(stdout);
 
     while (g_running) {
@@ -1800,8 +1797,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 (uint32_t)config->probe_interval_ms,
                 (uint32_t)config->path_timeout_ms);
             if (created_ifindex <= 0) {
-                fprintf(stderr, "Failed to create Spoke interface: %s\n",
-                        strerror(-created_ifindex));
+                dtun_log_err("Failed to create Spoke interface: %s", strerror(-created_ifindex));
                 ifindex = 0;
                 goto attempt_done;
             }
@@ -1924,7 +1920,7 @@ attempt_done:
         dtrg_msg_free(&sync);
         if (config->once) break;
         if (!success)
-            fprintf(stderr, "[dtund Spoke] Registration failed; retaining existing link and retrying\n");
+            dtun_log_err("[dtund Spoke] Registration failed; retaining existing link and retrying");
         if (g_running) sleep(1);
     }
 
@@ -1942,6 +1938,9 @@ int main(int argc, char **argv)
 {
     const char *config_file = NULL;
     const char *override_mode = NULL;
+    int force_syslog = 0;
+    const char *cli_syslog_ident = NULL;
+    const char *cli_syslog_facility = NULL;
     dtun_config_t config;
     uint8_t psk[32];
     int has_psk;
@@ -1957,20 +1956,43 @@ int main(int argc, char **argv)
             config_file = argv[++i];
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc)
             override_mode = argv[++i];
+        else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--syslog"))
+            force_syslog = 1;
+        else if (!strcmp(argv[i], "--syslog-ident") && i + 1 < argc)
+            cli_syslog_ident = argv[++i];
+        else if (!strcmp(argv[i], "--syslog-facility") && i + 1 < argc)
+            cli_syslog_facility = argv[++i];
     }
+    dtun_log_init(cli_syslog_ident ? cli_syslog_ident : "dtund", force_syslog, cli_syslog_facility);
     if (!config_file) {
-        fprintf(stderr, "Usage: %s -c /path/to/dtun.conf [--mode hub|spoke]\n",
+        dtun_log_err("Usage: %s -c /path/to/dtun.conf [--mode hub|spoke] [--syslog] [--syslog-facility <facility>] [--syslog-ident <ident>]",
                 argv[0]);
+        dtun_log_close();
         return 1;
     }
-    if (dtun_config_load(&config, config_file) < 0) return 1;
+    if (dtun_config_load(&config, config_file) < 0) {
+        dtun_log_close();
+        return 1;
+    }
+    if (force_syslog) config.syslog_enabled = 1;
+    if (cli_syslog_ident) {
+        free(config.syslog_ident);
+        config.syslog_ident = strdup(cli_syslog_ident);
+    }
+    if (cli_syslog_facility) {
+        free(config.syslog_facility);
+        config.syslog_facility = strdup(cli_syslog_facility);
+    }
+    dtun_log_init(config.syslog_ident ? config.syslog_ident : "dtund",
+                  config.syslog_enabled,
+                  config.syslog_facility);
     g_raw_transport = config.raw_transport;
     if (override_mode) {
         free(config.mode);
         config.mode = strdup(override_mode);
     }
     if (!config.mode) {
-        fprintf(stderr, "Error: mode must be hub or spoke\n");
+        dtun_log_err("Error: mode must be hub or spoke");
         dtun_config_free(&config);
         return 1;
     }
@@ -1981,7 +2003,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(config.mode, "hub") && config.ha_enabled &&
         dtund_ha_service_start(&ha_service, &config) < 0) {
-        fprintf(stderr, "Failed to start HA service\n");
+        dtun_log_err("Failed to start HA service");
         result = 1;
     } else if (!strcmp(config.mode, "hub")) {
         g_ha_service = ha_service;
@@ -1990,7 +2012,7 @@ int main(int argc, char **argv)
 ha_cycle:
             (void)dtund_ha_discover_leader(&config);
             if (dtun_ha_state_load(config.ha_state_file, &ha_state) < 0) {
-                fprintf(stderr, "Failed to load HA state\n");
+                dtun_log_err("Failed to load HA state");
                 result = 1;
                 goto daemon_done;
             }
@@ -1998,7 +2020,7 @@ ha_cycle:
             time_t last_seen = time(NULL);
             time_t stable_since = 0;
             int promoted = 0;
-            printf("[dtund HA] Standby Hub waiting for active leader\n");
+            dtun_log_info("[dtund HA] Standby Hub waiting for active leader");
             while (g_running && !promoted) {
                 int step;
                 if (config.ha_role && !strcmp(config.ha_role, "primary")) {
@@ -2030,7 +2052,7 @@ ha_cycle:
     else if (!strcmp(config.mode, "spoke"))
         result = run_spoke(&config, psk, has_psk);
     else {
-        fprintf(stderr, "Unknown mode: %s\n", config.mode);
+        dtun_log_err("Unknown mode: %s", config.mode);
         result = 1;
     }
 daemon_done:
@@ -2039,5 +2061,6 @@ daemon_done:
     OPENSSL_cleanse(psk, sizeof(psk));
     dtun_nl_close();
     dtun_config_free(&config);
+    dtun_log_close();
     return result;
 }

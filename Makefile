@@ -11,7 +11,7 @@ LDFLAGS ?=
 override LDFLAGS += -lcrypto
 
 BUILD_DIR = build
-CTL_OBJS = $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
+CTL_OBJS = $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
 CTL_HEADERS = $(wildcard src/ctl/*.h)
 HA_TOOL_HEADERS = $(wildcard tools/dtund_ha*.h tools/dtund_spoke_ha.h tools/dtunctl_ha.h)
 
@@ -51,9 +51,9 @@ $(BUILD_DIR)/test_ha_state: tests/test_ha_state.c $(BUILD_DIR)/ctl/dtun_ha_state
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/test_ha_runtime: tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o
+$(BUILD_DIR)/test_ha_runtime: tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/test_ha_join: tests/test_ha_join.c $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o
 	@mkdir -p $(BUILD_DIR)

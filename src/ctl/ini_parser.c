@@ -38,6 +38,10 @@ void dtun_config_init(dtun_config_t *config) {
     config->address = strdup_safe("0.0.0.0/24");
     config->psk_hex = NULL;
 
+    config->syslog_enabled = 0;
+    config->syslog_ident = strdup_safe("dtund");
+    config->syslog_facility = strdup_safe("daemon");
+
     config->bind_address = strdup_safe("0.0.0.0");
     config->bind_port = 49001;
     config->pool = strdup_safe("10.99.0.0/24");
@@ -82,6 +86,8 @@ void dtun_config_free(dtun_config_t *config) {
     free(config->local_outer_ip);
     free(config->address);
     free(config->psk_hex);
+    free(config->syslog_ident);
+    free(config->syslog_facility);
     free(config->bind_address);
     free(config->pool);
     free(config->state_file);
@@ -124,6 +130,13 @@ static void apply_value(dtun_config_t *c, const char *section,
     if (!strcmp(key, "node_id")) { c->node_id = strtoul(val, NULL, 10); return; }
     STRING_VALUE("address", address)
     STRING_VALUE("psk", psk_hex)
+    if (!strcmp(key, "syslog") || !strcmp(key, "use_syslog") ||
+        !strcmp(key, "log_syslog") || !strcmp(key, "syslog_enabled")) {
+        c->syslog_enabled = !strcmp(val, "true") || !strcmp(val, "1");
+        return;
+    }
+    STRING_VALUE("syslog_ident", syslog_ident)
+    STRING_VALUE("syslog_facility", syslog_facility)
     STRING_VALUE("bind_address", bind_address)
     INT_VALUE("bind_port", bind_port)
     if (!strcmp(key, "pool")) {

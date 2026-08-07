@@ -11,6 +11,55 @@
     } \
 } while (0)
 
+
+static int config_syslog_test(void)
+{
+    dtun_config_t config;
+    char path[] = "/tmp/dtun-syslog-test-XXXXXX";
+    FILE *file = NULL;
+    int fd = -1;
+    int result = -1;
+
+    memset(&config, 0, sizeof(config));
+    fd = mkstemp(path);
+    if (fd < 0) goto out;
+    file = fdopen(fd, "w");
+    if (!file) goto out;
+    fd = -1;
+    if (fputs("[global]\nsyslog = true\nsyslog_ident = testdtun\nsyslog_facility = local3\n",
+              file) == EOF) {
+        fclose(file);
+        file = NULL;
+        goto out;
+    }
+    if (fclose(file) != 0) {
+        file = NULL;
+        goto out;
+    }
+    file = NULL;
+    if (dtun_config_load_base(&config, path) < 0 ||
+        !config.syslog_enabled ||
+        !config.syslog_ident || strcmp(config.syslog_ident, "testdtun") ||
+        !config.syslog_facility || strcmp(config.syslog_facility, "local3"))
+        goto out;
+
+    dtun_log_init(config.syslog_ident, config.syslog_enabled, config.syslog_facility);
+    if (dtun_log_get_syslog() != 1) goto out;
+    dtun_log_info("Testing syslog info message");
+    dtun_log_err("Testing syslog error message");
+    dtun_log_set_syslog(0);
+    if (dtun_log_get_syslog() != 0) goto out;
+    dtun_log_close();
+
+    result = 0;
+out:
+    if (file) fclose(file);
+    if (fd >= 0) close(fd);
+    unlink(path);
+    dtun_config_free(&config);
+    return result;
+}
+
 static int config_pool_default_test(void)
 {
     dtun_config_t config;
@@ -62,6 +111,7 @@ int main(void)
     int result = 0;
 
     dtun_config_init(&config);
+    STATE_CHECK(config_syslog_test() == 0);
     STATE_CHECK(config_pool_default_test() == 0);
     STATE_CHECK(config.peer_timeout == 60);
     STATE_CHECK(config.identity_retention == 86400);

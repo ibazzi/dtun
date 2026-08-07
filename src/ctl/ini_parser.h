@@ -17,6 +17,11 @@ typedef struct {
     char *address;          /* inner IPv4 CIDR, e.g., "10.99.0.2/24" or "0.0.0.0/24" */
     char *psk_hex;          /* 64 hex characters (32 bytes) */
 
+    /* Logging settings */
+    int syslog_enabled;     /* 1 when syslog output is enabled */
+    char *syslog_ident;     /* syslog identity, default "dtund" */
+    char *syslog_facility;  /* syslog facility, default "daemon" */
+
     /* Hub-specific settings */
     char *bind_address;     /* default "0.0.0.0" */
     int bind_port;          /* default 49001 */
