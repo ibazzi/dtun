@@ -1,4 +1,6 @@
-.PHONY: all build modules ctools clean check test p2mp-test deb
+.PHONY: all build modules ctools clean check test p2mp-test deb format check-format
+
+CLANG_FORMAT ?= $(shell command -v clang-format || command -v clang-format-18 || echo true)
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 IP ?= $(CURDIR)/bin/ip
@@ -14,8 +16,23 @@ BUILD_DIR = build
 CTL_OBJS = $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
 CTL_HEADERS = $(wildcard src/ctl/*.h)
 HA_TOOL_HEADERS = $(wildcard tools/dtund_ha*.h tools/dtund_spoke_ha.h tools/dtunctl_ha.h)
+SRC_FILES = $(shell find src tools tests iproute2 -type f \( -name "*.c" -o -name "*.h" \))
 
 all: modules ctools
+
+format:
+	@if [ "$(CLANG_FORMAT)" != "true" ]; then \
+		$(CLANG_FORMAT) -i $(SRC_FILES); \
+		if [ -d "$(BUILD_DIR)" ]; then \
+			find $(BUILD_DIR) -type f \( -name "*.mod.c" -o -name "*.c" -o -name "*.h" \) -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
+		fi; \
+		find . -maxdepth 1 -type f -name "*.mod.c" -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
+	fi
+
+check-format:
+	@if [ "$(CLANG_FORMAT)" != "true" ]; then \
+		$(CLANG_FORMAT) --dry-run --Werror $(SRC_FILES); \
+	fi
 
 modules:
 	@mkdir -p $(BUILD_DIR)/src
@@ -24,6 +41,10 @@ modules:
 	@ln -snf $(CURDIR)/src/dtun_netlink.c $(BUILD_DIR)/src/dtun_netlink.c
 	@ln -snf $(CURDIR)/src/dtun.h $(BUILD_DIR)/src/dtun.h
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/$(BUILD_DIR) modules
+	@if [ "$(CLANG_FORMAT)" != "true" ]; then \
+		find $(BUILD_DIR) -type f \( -name "*.mod.c" -o -name "*.c" -o -name "*.h" \) -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
+		find . -maxdepth 1 -type f -name "*.mod.c" -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
+	fi
 
 ctools: $(BUILD_DIR)/dtund $(BUILD_DIR)/dtunctl
 
@@ -69,7 +90,7 @@ clean:
 	fi
 	rm -rf $(BUILD_DIR)
 
-check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR)/test_ha_state $(BUILD_DIR)/test_ha_runtime $(BUILD_DIR)/test_ha_join $(BUILD_DIR)/test_spoke_ha
+check: check-format ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR)/test_ha_state $(BUILD_DIR)/test_ha_runtime $(BUILD_DIR)/test_ha_join $(BUILD_DIR)/test_spoke_ha
 	./$(BUILD_DIR)/test_proto
 	./$(BUILD_DIR)/test_daemon_state
 	./$(BUILD_DIR)/test_ha_state

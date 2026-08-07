@@ -1,0 +1,16 @@
+#!/bin/sh
+# Git pre-commit hook to automatically format staged C/C++ files using clang-format
+
+CLANG_FORMAT=$(command -v clang-format || command -v clang-format-18 || echo "")
+
+if [ -n "$CLANG_FORMAT" ]; then
+    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(c|h)$')
+    if [ -n "$STAGED_FILES" ]; then
+        for FILE in $STAGED_FILES; do
+            if [ -f "$FILE" ]; then
+                "$CLANG_FORMAT" -i "$FILE"
+                git add "$FILE"
+            fi
+        done
+    fi
+fi
