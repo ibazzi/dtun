@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
@@ -22,8 +24,8 @@
 
 #define MAX_PEERS DTRG_MAX_SYNC_PEERS
 #define MAX_SESSIONS ((MAX_PEERS * (MAX_PEERS - 1)) / 2)
-#define HUB_STATE_VERSION 2U
-#define HUB_STATE_MAGIC "DTS2"
+#define HUB_STATE_FORMAT 1U
+#define HUB_STATE_MAGIC "DTSF"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -37,6 +39,11 @@ typedef struct {
     struct in_addr udp_addr;
     uint16_t udp_port;
     time_t last_seen;
+    uint64_t generation;
+    uint8_t lease_token[DTRG_LEASE_TOKEN_LEN];
+    uint64_t refresh_counter;
+    time_t offline_since;
+    uint8_t online;
 } hub_node_record_t;
 
 typedef struct {
@@ -46,12 +53,24 @@ typedef struct {
     uint32_t second_tunnel_id;
 } hub_session_record_t;
 
+typedef struct {
+    uint64_t node_id;
+    uint32_t tunnel_id;
+    uint32_t hub_tunnel_id;
+    struct in_addr address;
+    uint8_t prefix_len;
+    struct in_addr raw;
+    struct in_addr udp_addr;
+    uint16_t udp_port;
+    time_t last_seen;
+} hub_node_record_v2_t;
+
 /* Layout used by the original unversioned C daemon. */
 typedef struct {
     uint8_t cookie_key[32];
     uint32_t next_tunnel_id;
     uint64_t next_node_id;
-    hub_node_record_t nodes[MAX_PEERS];
+    hub_node_record_v2_t nodes[MAX_PEERS];
     int node_count;
 } legacy_hub_state_t;
 
@@ -63,6 +82,7 @@ typedef struct {
     uint64_t next_node_id;
     uint32_t node_count;
     uint32_t session_count;
+    uint64_t candidate_epoch;
     hub_node_record_t nodes[MAX_PEERS];
     hub_session_record_t sessions[MAX_SESSIONS];
 } hub_state_t;
@@ -71,10 +91,35 @@ typedef struct {
     uint64_t node_id;
     uint32_t tunnel_id;
     struct in_addr address;
+    uint64_t generation;
     int seen;
 } applied_peer_t;
 
 static hub_state_t g_hub_state;
+
+#define HUB_CHANGE_LOG_SIZE 512
+typedef struct { uint64_t epoch; uint64_t node_id; } hub_change_t;
+static hub_change_t g_hub_changes[HUB_CHANGE_LOG_SIZE];
+static size_t g_hub_change_head;
+static size_t g_hub_change_count;
+static int g_hub_state_dirty;
+
+static void hub_note_change(uint64_t node_id)
+{
+    size_t slot;
+    g_hub_state.candidate_epoch++;
+    if (!g_hub_state.candidate_epoch) g_hub_state.candidate_epoch++;
+    slot = (g_hub_change_head + g_hub_change_count) % HUB_CHANGE_LOG_SIZE;
+    if (g_hub_change_count == HUB_CHANGE_LOG_SIZE) {
+        g_hub_change_head = (g_hub_change_head + 1) % HUB_CHANGE_LOG_SIZE;
+        slot = (g_hub_change_head + g_hub_change_count - 1) % HUB_CHANGE_LOG_SIZE;
+    } else {
+        g_hub_change_count++;
+    }
+    g_hub_changes[slot].epoch = g_hub_state.candidate_epoch;
+    g_hub_changes[slot].node_id = node_id;
+    g_hub_state_dirty = 1;
+}
 
 static void handle_signal(int sig)
 {
@@ -150,6 +195,54 @@ static int same_endpoint(const struct sockaddr_in *left,
     return left->sin_family == right->sin_family &&
            left->sin_addr.s_addr == right->sin_addr.s_addr &&
            left->sin_port == right->sin_port;
+}
+
+static int open_route_monitor(void)
+{
+    struct sockaddr_nl address;
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+    memset(&address, 0, sizeof(address));
+    address.nl_family = AF_NETLINK;
+    address.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE;
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int route_change_pending(int fd, uint32_t dtun_ifindex)
+{
+    char buffer[8192];
+    int changed = 0;
+    ssize_t length;
+
+    if (fd < 0) return 0;
+    while ((length = recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT)) > 0) {
+        struct nlmsghdr *nlh;
+        int remaining = (int)length;
+        for (nlh = (struct nlmsghdr *)buffer; NLMSG_OK(nlh, remaining);
+             nlh = NLMSG_NEXT(nlh, remaining)) {
+            if (nlh->nlmsg_type == RTM_NEWLINK ||
+                nlh->nlmsg_type == RTM_DELLINK) {
+                struct ifinfomsg *ifi = NLMSG_DATA(nlh);
+                if ((uint32_t)ifi->ifi_index != dtun_ifindex) changed = 1;
+            } else if (nlh->nlmsg_type == RTM_NEWADDR ||
+                       nlh->nlmsg_type == RTM_DELADDR) {
+                struct ifaddrmsg *ifa = NLMSG_DATA(nlh);
+                if (ifa->ifa_family == AF_INET &&
+                    ifa->ifa_index != dtun_ifindex) changed = 1;
+            } else if (nlh->nlmsg_type == RTM_NEWROUTE ||
+                       nlh->nlmsg_type == RTM_DELROUTE) {
+                struct rtmsg *route = NLMSG_DATA(nlh);
+                if (route->rtm_family == AF_INET && route->rtm_dst_len == 0 &&
+                    route->rtm_table == RT_TABLE_MAIN)
+                    changed = 1;
+            }
+        }
+    }
+    return changed;
 }
 
 static void trigger_tunnel_warmup(struct in_addr address)
@@ -239,10 +332,15 @@ static int make_parent_dirs(const char *path)
 static void hub_state_init(void)
 {
     memset(&g_hub_state, 0, sizeof(g_hub_state));
+    memset(g_hub_changes, 0, sizeof(g_hub_changes));
+    g_hub_change_head = 0;
+    g_hub_change_count = 0;
+    g_hub_state_dirty = 0;
     memcpy(g_hub_state.magic, HUB_STATE_MAGIC, 4);
-    g_hub_state.version = HUB_STATE_VERSION;
+    g_hub_state.version = HUB_STATE_FORMAT;
     g_hub_state.next_tunnel_id = 100;
     g_hub_state.next_node_id = 2;
+    g_hub_state.candidate_epoch = 1;
     if (RAND_bytes(g_hub_state.cookie_key, sizeof(g_hub_state.cookie_key)) != 1) {
         fprintf(stderr, "Failed to generate Hub cookie key\n");
         exit(1);
@@ -267,17 +365,21 @@ static int hub_load_state(const char *path)
         perror("Hub state open failed");
         return -1;
     }
+    memset(g_hub_changes, 0, sizeof(g_hub_changes));
+    g_hub_change_head = 0;
+    g_hub_change_count = 0;
+    g_hub_state_dirty = 0;
     if ((size_t)st.st_size == sizeof(g_hub_state)) {
         if (fread(&g_hub_state, sizeof(g_hub_state), 1, file) != 1 ||
             memcmp(g_hub_state.magic, HUB_STATE_MAGIC, 4) != 0 ||
-            g_hub_state.version != HUB_STATE_VERSION) {
+            g_hub_state.version != HUB_STATE_FORMAT) {
             fclose(file);
             fprintf(stderr, "Invalid or unsupported Hub state header\n");
             return -1;
         }
     } else if ((size_t)st.st_size == sizeof(legacy_hub_state_t)) {
         legacy_hub_state_t legacy;
-        uint32_t count;
+        uint32_t count, i;
 
         if (fread(&legacy, sizeof(legacy), 1, file) != 1) {
             fclose(file);
@@ -295,8 +397,20 @@ static int hub_load_state(const char *path)
         g_hub_state.next_tunnel_id = legacy.next_tunnel_id;
         g_hub_state.next_node_id = legacy.next_node_id;
         g_hub_state.node_count = count;
-        memcpy(g_hub_state.nodes, legacy.nodes,
-               (size_t)count * sizeof(g_hub_state.nodes[0]));
+        for (i = 0; i < count; i++) {
+            hub_node_record_t *dst = &g_hub_state.nodes[i];
+            hub_node_record_v2_t *src = &legacy.nodes[i];
+            dst->node_id = src->node_id;
+            dst->tunnel_id = src->tunnel_id;
+            dst->hub_tunnel_id = src->hub_tunnel_id;
+            dst->address = src->address;
+            dst->prefix_len = src->prefix_len;
+            dst->raw = src->raw;
+            dst->udp_addr = src->udp_addr;
+            dst->udp_port = src->udp_port;
+            dst->last_seen = src->last_seen;
+            dst->generation = 1;
+        }
         printf("[dtund Hub] Imported legacy state with %u nodes\n", count);
     } else {
         fclose(file);
@@ -602,6 +716,7 @@ static hub_session_record_t *hub_session(uint64_t node_id, uint64_t other_id)
     session->second_node = second;
     session->first_tunnel_id = allocate_tunnel_id();
     session->second_tunnel_id = allocate_tunnel_id();
+    g_hub_state_dirty = 1;
     return session;
 }
 
@@ -645,6 +760,8 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex)
 {
     time_t now = time(NULL);
     int timeout = config->peer_timeout > 0 ? config->peer_timeout : 60;
+    int retention = config->identity_retention > 0 ?
+                    config->identity_retention : 86400;
     uint32_t i = 0;
     int changed = 0;
 
@@ -655,6 +772,18 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex)
         struct in_addr address;
         int err;
 
+        if (!node->online) {
+            if (node->offline_since > 0 && now >= node->offline_since &&
+                now - node->offline_since > retention) {
+                uint64_t removed_node = node->node_id;
+                hub_remove_node_at(i);
+                hub_note_change(removed_node);
+                changed = 1;
+                continue;
+            }
+            i++;
+            continue;
+        }
         if (!hub_node_expired(node, now, timeout)) {
             i++;
             continue;
@@ -670,19 +799,25 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex)
             i++;
             continue;
         }
-        hub_remove_node_at(i);
+        (void)dtun_nl_route_del(ifindex, tunnel_id, address, 32);
+        node->online = 0;
+        node->offline_since = now;
+        node->generation++;
+        if (!node->generation) node->generation++;
+        hub_note_change(node_id);
         changed = 1;
         {
             char text[INET_ADDRSTRLEN];
 
             inet_ntop(AF_INET, &address, text, sizeof(text));
-            printf("[dtund Hub] Expired Spoke NodeID=%llu InnerIP=%s after %ds\n",
+            printf("[dtund Hub] Marked Spoke NodeID=%llu InnerIP=%s offline after %ds\n",
                    (unsigned long long)node_id, text, timeout);
             fflush(stdout);
         }
+        i++;
     }
-    if (changed && hub_save_state(config->state_file) < 0)
-        return -1;
+    if (changed && hub_save_state(config->state_file) < 0) return -1;
+    if (changed) g_hub_state_dirty = 0;
     return changed;
 }
 
@@ -713,13 +848,20 @@ static uint16_t build_peer_sync(uint32_t ifindex, uint64_t node_id,
         hub_session_record_t *session;
         dtun_nl_peer_status_t status;
 
-        if (other->node_id == node_id) continue;
+        if (other->node_id == node_id || !other->online) continue;
         if (dtun_nl_peer_get(ifindex, other->hub_tunnel_id, &status) < 0 ||
-            !status.udp_up || !status.udp_addr.s_addr || !status.udp_port)
+            !status.udp_up || !status.direct_udp_addr.s_addr ||
+            !status.direct_udp_port)
             continue;
-        other->udp_addr = status.udp_addr;
-        other->udp_port = status.udp_port;
-        other->raw = status.udp_addr;
+        if (other->udp_addr.s_addr != status.direct_udp_addr.s_addr ||
+            other->udp_port != status.direct_udp_port) {
+            other->udp_addr = status.direct_udp_addr;
+            other->udp_port = status.direct_udp_port;
+            other->raw = status.direct_udp_addr;
+            other->generation++;
+            if (!other->generation) other->generation++;
+            hub_note_change(other->node_id);
+        }
         session = hub_session(node_id, other->node_id);
         if (!session) break;
         peers[count].node_id = other->node_id;
@@ -727,6 +869,8 @@ static uint16_t build_peer_sync(uint32_t ifindex, uint64_t node_id,
         peers[count].raw = other->raw;
         peers[count].udp_addr = other->udp_addr;
         peers[count].udp_port = other->udp_port;
+        peers[count].generation = other->generation;
+        peers[count].flags = DTRG_PEER_ONLINE;
         if (node_id == session->first_node) {
             peers[count].tunnel_id = session->first_tunnel_id;
             peers[count].remote_tunnel_id = session->second_tunnel_id;
@@ -737,6 +881,110 @@ static uint16_t build_peer_sync(uint32_t ifindex, uint64_t node_id,
         count++;
     }
     return count;
+}
+
+static int refresh_hub_candidates(uint32_t ifindex)
+{
+    uint32_t i;
+    int changed = 0;
+
+    for (i = 0; i < g_hub_state.node_count; i++) {
+        hub_node_record_t *node = &g_hub_state.nodes[i];
+        dtun_nl_peer_status_t status;
+        if (!node->online ||
+            dtun_nl_peer_get(ifindex, node->hub_tunnel_id, &status) < 0 ||
+            !status.udp_up || !status.direct_udp_addr.s_addr ||
+            !status.direct_udp_port)
+            continue;
+        if (node->udp_addr.s_addr == status.direct_udp_addr.s_addr &&
+            node->udp_port == status.direct_udp_port)
+            continue;
+        node->udp_addr = status.direct_udp_addr;
+        node->udp_port = status.direct_udp_port;
+        node->raw = status.direct_udp_addr;
+        node->generation++;
+        if (!node->generation) node->generation++;
+        hub_note_change(node->node_id);
+        changed = 1;
+    }
+    return changed;
+}
+
+#define REFRESH_PEERS_PER_PAGE 20
+
+static int fill_sync_peer(uint64_t requester, uint64_t other_id,
+                          dtrg_sync_peer_t *peer)
+{
+    hub_node_record_t *other = node_by_id(other_id);
+    hub_session_record_t *session;
+
+    memset(peer, 0, sizeof(*peer));
+    peer->node_id = other_id;
+    if (!other) {
+        peer->flags = DTRG_PEER_TOMBSTONE;
+        return 0;
+    }
+    session = hub_session(requester, other_id);
+    if (!session) return -1;
+    peer->address = other->address;
+    peer->raw = other->raw;
+    peer->udp_addr = other->udp_addr;
+    peer->udp_port = other->udp_port;
+    peer->generation = other->generation;
+    if (other->online && other->udp_addr.s_addr && other->udp_port)
+        peer->flags = DTRG_PEER_ONLINE;
+    if (requester == session->first_node) {
+        peer->tunnel_id = session->first_tunnel_id;
+        peer->remote_tunnel_id = session->second_tunnel_id;
+    } else {
+        peer->tunnel_id = session->second_tunnel_id;
+        peer->remote_tunnel_id = session->first_tunnel_id;
+    }
+    return 0;
+}
+
+static uint16_t build_refresh_page(uint64_t requester, uint64_t requested_epoch,
+                                   uint16_t offset,
+                                   dtrg_sync_peer_t peers[REFRESH_PEERS_PER_PAGE],
+                                   uint8_t *flags, uint16_t *next_offset)
+{
+    uint64_t ids[MAX_PEERS + HUB_CHANGE_LOG_SIZE];
+    size_t total = 0, i, start;
+    int snapshot = 0;
+
+    *flags = 0;
+    *next_offset = 0;
+    if (requested_epoch == g_hub_state.candidate_epoch)
+        return 0;
+    if (!g_hub_change_count ||
+        requested_epoch < g_hub_changes[g_hub_change_head].epoch - 1)
+        snapshot = 1;
+    if (snapshot) {
+        *flags |= DTRG_REFRESH_SNAPSHOT;
+        for (i = 0; i < g_hub_state.node_count; i++)
+            if (g_hub_state.nodes[i].node_id != requester)
+                ids[total++] = g_hub_state.nodes[i].node_id;
+    } else {
+        for (i = 0; i < g_hub_change_count; i++) {
+            hub_change_t *change = &g_hub_changes[
+                (g_hub_change_head + i) % HUB_CHANGE_LOG_SIZE];
+            size_t j;
+            if (change->epoch <= requested_epoch || change->node_id == requester)
+                continue;
+            for (j = 0; j < total; j++)
+                if (ids[j] == change->node_id) break;
+            if (j == total) ids[total++] = change->node_id;
+        }
+    }
+    start = offset < total ? offset : total;
+    for (i = start; i < total && i - start < REFRESH_PEERS_PER_PAGE; i++)
+        if (fill_sync_peer(requester, ids[i], &peers[i - start]) < 0)
+            break;
+    if (i < total) {
+        *flags |= DTRG_REFRESH_MORE;
+        *next_offset = (uint16_t)i;
+    }
+    return (uint16_t)(i - start);
 }
 
 static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
@@ -759,12 +1007,30 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     if (hub_load_state(config->state_file) < 0 ||
         hub_validate_state(config, inner_address) < 0)
         return 1;
+    /* A daemon restart also rebuilds every kernel peer and therefore resets
+     * data-plane transmit sequences.  Rotate persisted leases so connected
+     * Spokes cannot silently continue REFRESH with replay windows from the
+     * previous Hub lifecycle; the subsequent authenticated registration
+     * recreates both ends of each peer. */
+    if (g_hub_state.node_count) {
+        uint32_t i;
+        for (i = 0; i < g_hub_state.node_count; i++) {
+            if (RAND_bytes(g_hub_state.nodes[i].lease_token,
+                           sizeof(g_hub_state.nodes[i].lease_token)) != 1)
+                return 1;
+            g_hub_state.nodes[i].refresh_counter = 0;
+        }
+        if (hub_save_state(config->state_file) < 0)
+            return 1;
+    }
     if (dtun_module_ensure_loaded() < 0)
         return 1;
     created_ifindex = dtun_link_create(config->interface, outer_address,
                                        data_port,
                                        config->node_id ? config->node_id : 1,
-                                       no_hub, 0);
+                                       no_hub, 0,
+                                       (uint32_t)config->probe_interval_ms,
+                                       (uint32_t)config->path_timeout_ms);
     if (created_ifindex <= 0) {
         fprintf(stderr, "Failed to create Hub interface %s: %s\n",
                 config->interface, strerror(-created_ifindex));
@@ -775,6 +1041,35 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                                     inner_address, prefix_len) < 0) {
         fprintf(stderr, "Failed to create Hub interface %s\n", config->interface);
         return 1;
+    }
+    /* Restore persisted online peers before accepting REFRESH.  This lets an
+     * authenticated data probe update a changed NAT mapping immediately after
+     * a Hub restart without forcing every Spoke through full registration. */
+    for (uint32_t i = 0; i < g_hub_state.node_count; i++) {
+        hub_node_record_t *record = &g_hub_state.nodes[i];
+        dtun_nl_peer_info_t peer;
+        if (!record->online) continue;
+        memset(&peer, 0, sizeof(peer));
+        peer.ifindex = ifindex;
+        peer.tunnel_id = record->hub_tunnel_id;
+        peer.remote_tunnel_id = record->tunnel_id;
+        peer.node_id = record->node_id;
+        peer.raw_addr = record->raw;
+        peer.udp_addr = record->udp_addr;
+        peer.udp_port = record->udp_port;
+        peer.dynamic_raw = 1;
+        peer.has_dynamic_raw = 1;
+        peer.candidate_generation = record->generation;
+        peer.has_generation = 1;
+        peer.has_key = has_psk;
+        if (has_psk) memcpy(peer.key, psk, sizeof(peer.key));
+        if (program_peer(&peer) < 0 ||
+            program_route(ifindex, record->hub_tunnel_id,
+                          record->address, 32) < 0) {
+            fprintf(stderr, "Failed to restore persisted Hub peer %llu\n",
+                    (unsigned long long)record->node_id);
+            goto fail_link;
+        }
     }
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) goto fail_link;
@@ -788,8 +1083,8 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         close(sock);
         goto fail_link;
     }
-    printf("[dtund] Hub listening on %s:%d (DTRG v%d)\n",
-           config->bind_address, config->bind_port, DTRG_VERSION);
+    printf("[dtund] Hub listening on %s:%d (DTRG)\n",
+           config->bind_address, config->bind_port);
     fflush(stdout);
     while (g_running) {
         struct sockaddr_in source;
@@ -798,9 +1093,14 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                                   (struct sockaddr *)&source, &source_len);
         dtrg_msg_t message;
 
-        (void)hub_expire_nodes(config, ifindex);
-        if (length <= 0) continue;
-        if (dtrg_parse(psk, rx, (size_t)length, &message) < 0) continue;
+        if (length <= 0) {
+            (void)hub_expire_nodes(config, ifindex);
+            continue;
+        }
+        if (dtrg_parse(psk, rx, (size_t)length, &message) < 0) {
+            (void)hub_expire_nodes(config, ifindex);
+            continue;
+        }
         if (message.kind == DTRG_INIT) {
             uint64_t seconds = config->cookie_seconds > 0 ?
                                (uint64_t)config->cookie_seconds : 30;
@@ -833,19 +1133,50 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 dtrg_sync_peer_t sync_peers[MAX_PEERS];
                 uint16_t sync_count;
                 ssize_t packed;
+                int peer_error;
 
-                record->raw = source.sin_addr;
-                record->udp_addr = source.sin_addr;
-                record->udp_port = data_port;
+                if (!record->online) {
+                    record->generation++;
+                    if (!record->generation) record->generation++;
+                    hub_note_change(record->node_id);
+                }
+                record->online = 1;
+                record->offline_since = 0;
                 record->last_seen = time(NULL);
+                record->refresh_counter = 0;
+                if (RAND_bytes(record->lease_token,
+                               sizeof(record->lease_token)) != 1) {
+                    dtrg_msg_free(&message);
+                    continue;
+                }
+                /* A full authenticated registration starts a new Spoke data
+                 * plane lifecycle.  Recreate the kernel peer so packets from
+                 * a restarted Spoke are not rejected by the previous
+                 * lifecycle's replay window.  Endpoint-only changes use
+                 * REFRESH/PROBE and never take this path. */
+                (void)dtun_nl_route_del(ifindex, record->hub_tunnel_id,
+                                        record->address, 32);
+                peer_error = dtun_nl_peer_del(ifindex,
+                                              record->hub_tunnel_id);
+                if (peer_error < 0 && peer_error != -ENOENT) {
+                    fprintf(stderr,
+                            "[dtund Hub] Failed to reset registered peer: %s\n",
+                            strerror(-peer_error));
+                    dtrg_msg_free(&message);
+                    continue;
+                }
                 memset(&peer, 0, sizeof(peer));
                 peer.ifindex = ifindex;
                 peer.tunnel_id = record->hub_tunnel_id;
                 peer.remote_tunnel_id = record->tunnel_id;
                 peer.node_id = record->node_id;
-                peer.raw_addr = record->raw;
-                peer.udp_addr = record->udp_addr;
-                peer.udp_port = record->udp_port;
+                peer.raw_addr = record->raw.s_addr ? record->raw : source.sin_addr;
+                peer.udp_addr = record->udp_addr.s_addr ? record->udp_addr : source.sin_addr;
+                peer.udp_port = record->udp_port ? record->udp_port : data_port;
+                peer.dynamic_raw = 1;
+                peer.has_dynamic_raw = 1;
+                peer.candidate_generation = record->generation;
+                peer.has_generation = 1;
                 peer.has_key = has_psk;
                 if (has_psk) memcpy(peer.key, psk, sizeof(peer.key));
                 if (program_peer(&peer) < 0 ||
@@ -862,11 +1193,14 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                     dtrg_msg_free(&message);
                     continue;
                 }
+                g_hub_state_dirty = 0;
                 packed = dtrg_pack_ack(psk, record->node_id,
                                        record->tunnel_id,
                                        record->hub_tunnel_id,
                                        record->address, record->prefix_len,
                                        data_port, message.nonce,
+                                       record->lease_token,
+                                       g_hub_state.candidate_epoch,
                                        tx, sizeof(tx));
                 if (packed > 0)
                     (void)sendto(sock, tx, (size_t)packed, 0,
@@ -886,8 +1220,67 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                     fflush(stdout);
                 }
             }
+        } else if (message.kind == DTRG_REFRESH) {
+            hub_node_record_t *record = node_by_id(message.node_id);
+            dtrg_sync_peer_t page[REFRESH_PEERS_PER_PAGE];
+            uint8_t refresh_tx[1200];
+            uint8_t flags;
+            uint16_t next_offset, count;
+            ssize_t packed;
+            int candidates_changed;
+
+            if (!record) {
+                dtrg_msg_free(&message);
+                (void)hub_expire_nodes(config, ifindex);
+                continue;
+            }
+            if (!record->online ||
+                CRYPTO_memcmp(record->lease_token, message.lease_token,
+                              sizeof(record->lease_token)) != 0 ||
+                message.counter < record->refresh_counter ||
+                (message.counter == record->refresh_counter &&
+                 message.offset == 0)) {
+                struct in_addr no_address = {0};
+
+                /* Echo only the stale token supplied by the requester.  The
+                 * authenticated flag tells a legitimate Spoke to perform the
+                 * full handshake immediately without disclosing the Hub's
+                 * newly rotated lease token. */
+                packed = dtrg_pack_refresh_ack(
+                    psk, message.node_id, message.lease_token,
+                    message.counter, g_hub_state.candidate_epoch,
+                    no_address, 0, DTRG_REFRESH_RE_REGISTER, 0,
+                    NULL, 0, refresh_tx, sizeof(refresh_tx));
+                if (packed > 0)
+                    (void)sendto(sock, refresh_tx, (size_t)packed, 0,
+                                 (struct sockaddr *)&source, source_len);
+                dtrg_msg_free(&message);
+                (void)hub_expire_nodes(config, ifindex);
+                continue;
+            }
+            if (message.offset == 0)
+                record->refresh_counter = message.counter;
+            record->last_seen = time(NULL);
+            candidates_changed = refresh_hub_candidates(ifindex);
+            memset(page, 0, sizeof(page));
+            count = build_refresh_page(record->node_id, message.epoch,
+                                       message.offset, page, &flags,
+                                       &next_offset);
+            packed = dtrg_pack_refresh_ack(
+                psk, record->node_id, record->lease_token, message.counter,
+                g_hub_state.candidate_epoch, record->udp_addr,
+                record->udp_port, flags, next_offset, page, count,
+                refresh_tx, sizeof(refresh_tx));
+            if (packed > 0)
+                (void)sendto(sock, refresh_tx, (size_t)packed, 0,
+                             (struct sockaddr *)&source, source_len);
+            if (candidates_changed || g_hub_state_dirty) {
+                if (hub_save_state(config->state_file) == 0)
+                    g_hub_state_dirty = 0;
+            }
         }
         dtrg_msg_free(&message);
+        (void)hub_expire_nodes(config, ifindex);
     }
     close(sock);
     dtun_link_delete_by_name(config->interface);
@@ -907,55 +1300,98 @@ static void remove_applied_peer(uint32_t ifindex, applied_peer_t *peer)
     memset(peer, 0, sizeof(*peer));
 }
 
+static applied_peer_t *find_applied_peer(applied_peer_t applied[MAX_PEERS],
+                                         uint16_t count, uint64_t node_id)
+{
+    uint16_t i;
+    for (i = 0; i < count; i++)
+        if (applied[i].node_id == node_id) return &applied[i];
+    return NULL;
+}
+
+static void delete_applied_node(uint32_t ifindex,
+                                applied_peer_t applied[MAX_PEERS],
+                                uint16_t *count, uint64_t node_id)
+{
+    uint16_t i;
+    for (i = 0; i < *count; i++) {
+        if (applied[i].node_id != node_id) continue;
+        remove_applied_peer(ifindex, &applied[i]);
+        if (i + 1 < *count)
+            memmove(&applied[i], &applied[i + 1],
+                    (size_t)(*count - i - 1) * sizeof(applied[0]));
+        (*count)--;
+        return;
+    }
+}
+
+static int apply_peer_item(uint32_t ifindex, const dtrg_sync_peer_t *item,
+                           const uint8_t psk[32], int has_psk,
+                           applied_peer_t applied[MAX_PEERS], uint16_t *count)
+{
+    applied_peer_t *slot = find_applied_peer(applied, *count, item->node_id);
+    dtun_nl_peer_info_t peer;
+
+    if (item->flags & DTRG_PEER_TOMBSTONE) {
+        delete_applied_node(ifindex, applied, count, item->node_id);
+        return 0;
+    }
+    if (!(item->flags & DTRG_PEER_ONLINE)) {
+        if (slot) slot->seen = 1;
+        return 0; /* Retain the peer so the kernel can use Hub fallback. */
+    }
+    if (!item->node_id || !item->tunnel_id || !item->remote_tunnel_id ||
+        !item->address.s_addr || !item->udp_addr.s_addr || !item->udp_port)
+        return 0;
+    if (slot && item->generation < slot->generation)
+        return 0;
+    if (slot && (slot->tunnel_id != item->tunnel_id ||
+                 slot->address.s_addr != item->address.s_addr)) {
+        delete_applied_node(ifindex, applied, count, item->node_id);
+        slot = NULL;
+    }
+    if (!slot) {
+        if (*count >= MAX_PEERS) return -1;
+        slot = &applied[(*count)++];
+        memset(slot, 0, sizeof(*slot));
+        slot->node_id = item->node_id;
+        slot->tunnel_id = item->tunnel_id;
+        slot->address = item->address;
+    }
+    memset(&peer, 0, sizeof(peer));
+    peer.ifindex = ifindex;
+    peer.tunnel_id = item->tunnel_id;
+    peer.remote_tunnel_id = item->remote_tunnel_id;
+    peer.node_id = item->node_id;
+    peer.raw_addr = item->raw;
+    peer.udp_addr = item->udp_addr;
+    peer.udp_port = item->udp_port;
+    peer.dynamic_raw = 1;
+    peer.has_dynamic_raw = 1;
+    peer.candidate_generation = item->generation;
+    peer.has_generation = 1;
+    peer.has_key = has_psk;
+    if (has_psk) memcpy(peer.key, psk, sizeof(peer.key));
+    if (program_peer(&peer) < 0 ||
+        program_route(ifindex, item->tunnel_id, item->address, 32) < 0)
+        return -1;
+    slot->generation = item->generation;
+    slot->seen = 1;
+    return 0;
+}
+
 static int apply_sync(uint32_t ifindex, const dtrg_msg_t *sync,
                       const uint8_t psk[32], int has_psk,
                       applied_peer_t applied[MAX_PEERS], uint16_t *applied_count)
 {
-    uint16_t i, j;
+    uint16_t i;
 
     for (i = 0; i < *applied_count; i++) applied[i].seen = 0;
     for (i = 0; i < sync->peer_count; i++) {
         const dtrg_sync_peer_t *item = &sync->peers[i];
-        dtun_nl_peer_info_t peer;
-        applied_peer_t *slot = NULL;
-
-        if (!item->node_id || !item->tunnel_id || !item->remote_tunnel_id ||
-            !item->address.s_addr || !item->udp_addr.s_addr || !item->udp_port)
-            continue;
-        for (j = 0; j < *applied_count; j++) {
-            if (applied[j].node_id == item->node_id) {
-                slot = &applied[j];
-                break;
-            }
-        }
-        if (slot && (slot->tunnel_id != item->tunnel_id ||
-                     slot->address.s_addr != item->address.s_addr)) {
-            remove_applied_peer(ifindex, slot);
-            slot = NULL;
-        }
-        if (!slot) {
-            if (*applied_count >= MAX_PEERS) return -1;
-            slot = &applied[(*applied_count)++];
-            memset(slot, 0, sizeof(*slot));
-            slot->node_id = item->node_id;
-            slot->tunnel_id = item->tunnel_id;
-            slot->address = item->address;
-        }
-        memset(&peer, 0, sizeof(peer));
-        peer.ifindex = ifindex;
-        peer.tunnel_id = item->tunnel_id;
-        peer.remote_tunnel_id = item->remote_tunnel_id;
-        peer.node_id = item->node_id;
-        peer.raw_addr = item->raw;
-        peer.udp_addr = item->udp_addr;
-        peer.udp_port = item->udp_port;
-        peer.has_key = has_psk;
-        if (has_psk) memcpy(peer.key, psk, sizeof(peer.key));
-        if (program_peer(&peer) < 0 ||
-            program_route(ifindex, item->tunnel_id,
-                          item->address, 32) < 0)
+        if (apply_peer_item(ifindex, item, psk, has_psk, applied,
+                            applied_count) < 0)
             return -1;
-        slot->seen = 1;
     }
     for (i = 0; i < *applied_count;) {
         if (applied[i].seen) {
@@ -971,9 +1407,23 @@ static int apply_sync(uint32_t ifindex, const dtrg_msg_t *sync,
     return 0;
 }
 
+static int apply_refresh_delta(uint32_t ifindex, const dtrg_msg_t *reply,
+                               const uint8_t psk[32], int has_psk,
+                               applied_peer_t applied[MAX_PEERS],
+                               uint16_t *applied_count)
+{
+    uint16_t i;
+    for (i = 0; i < reply->peer_count; i++)
+        if (apply_peer_item(ifindex, &reply->peers[i], psk, has_psk,
+                            applied, applied_count) < 0)
+            return -1;
+    return 0;
+}
+
 static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
 {
     int sock = -1;
+    int route_fd = -1;
     struct sockaddr_in local_address, hub_control;
     struct timeval timeout;
     struct in_addr requested_address = {0}, raw_claim = {0};
@@ -988,6 +1438,9 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     uint64_t assigned_node = 0;
     applied_peer_t applied[MAX_PEERS];
     uint16_t applied_count = 0;
+    uint8_t lease_token[DTRG_LEASE_TOKEN_LEN] = {0};
+    uint64_t refresh_epoch = 0, refresh_counter = 0;
+    int have_lease = 0, refresh_failures = 0;
     int registered_once = 0;
     int result = 1;
 
@@ -997,6 +1450,16 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         parse_cidr(config->address, &requested_address,
                    &requested_prefix) < 0) {
         fprintf(stderr, "Invalid Spoke Hub or inner address\n");
+        return 1;
+    }
+    if (config->fast_recovery && strcmp(config->local_outer_ip, "0.0.0.0")) {
+        fprintf(stderr,
+                "fast_recovery requires local_outer_ip=0.0.0.0 on a Spoke\n");
+        return 1;
+    }
+    if (config->probe_interval_ms < 100 || config->path_timeout_ms < 500 ||
+        config->path_timeout_ms < 2 * config->probe_interval_ms) {
+        fprintf(stderr, "invalid probe/path timeout configuration\n");
         return 1;
     }
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -1011,15 +1474,16 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     }
     hub_control.sin_family = AF_INET;
     hub_control.sin_port = htons((uint16_t)config->hub_port);
-    timeout.tv_sec = config->timeout > 0 ? config->timeout : 5;
+    timeout.tv_sec = config->fast_recovery ? 1 :
+                     (config->timeout > 0 ? config->timeout : 5);
     timeout.tv_usec = 0;
     (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    route_fd = open_route_monitor();
     if (dtun_module_ensure_loaded() < 0)
         return 1;
 
-    printf("[dtund] Spoke registering with %s:%d every %ds (DTRG v%d)\n",
-           config->hub_address, config->hub_port, config->interval,
-           DTRG_VERSION);
+    printf("[dtund] Spoke registering with %s:%d (DTRG)\n",
+           config->hub_address, config->hub_port);
     fflush(stdout);
 
     while (g_running) {
@@ -1029,6 +1493,114 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         socklen_t source_len;
         ssize_t length, packed;
         int success = 0;
+
+        if (ifindex && route_change_pending(route_fd, ifindex)) {
+            (void)dtun_nl_rebind(ifindex);
+            refresh_failures = 0;
+        }
+
+        if (have_lease && ifindex) {
+            uint16_t offset = 0;
+            int refresh_ok = 1;
+            int snapshot = 0;
+            int force_register = 0;
+
+            refresh_counter++;
+            if (!refresh_counter) refresh_counter++;
+            do {
+                dtrg_msg_t refresh_reply;
+                ssize_t refresh_length, refresh_packed;
+
+                memset(&refresh_reply, 0, sizeof(refresh_reply));
+                refresh_packed = dtrg_pack_refresh(
+                    psk, assigned_node, lease_token, refresh_counter,
+                    refresh_epoch, offset, tx, sizeof(tx));
+                if (refresh_packed < 0 ||
+                    sendto(sock, tx, (size_t)refresh_packed, 0,
+                           (struct sockaddr *)&hub_control,
+                           sizeof(hub_control)) < 0) {
+                    refresh_ok = 0;
+                    break;
+                }
+                source_len = sizeof(source);
+                refresh_length = recvfrom(sock, rx, sizeof(rx), 0,
+                                          (struct sockaddr *)&source,
+                                          &source_len);
+                if (refresh_length <= 0 ||
+                    !same_endpoint(&source, &hub_control) ||
+                    dtrg_parse(psk, rx, (size_t)refresh_length,
+                               &refresh_reply) < 0 ||
+                    refresh_reply.kind != DTRG_REFRESH_ACK ||
+                    refresh_reply.node_id != assigned_node ||
+                    refresh_reply.counter != refresh_counter ||
+                    CRYPTO_memcmp(refresh_reply.lease_token, lease_token,
+                                  sizeof(lease_token)) != 0) {
+                    dtrg_msg_free(&refresh_reply);
+                    refresh_ok = 0;
+                    break;
+                }
+                if (refresh_reply.flags & DTRG_REFRESH_RE_REGISTER) {
+                    force_register = 1;
+                    refresh_ok = 0;
+                    dtrg_msg_free(&refresh_reply);
+                    break;
+                }
+                if ((refresh_reply.flags & DTRG_REFRESH_SNAPSHOT) &&
+                    offset == 0) {
+                    uint16_t k;
+                    snapshot = 1;
+                    for (k = 0; k < applied_count; k++) applied[k].seen = 0;
+                }
+                if (apply_refresh_delta(ifindex, &refresh_reply, psk,
+                                        has_psk, applied,
+                                        &applied_count) < 0) {
+                    dtrg_msg_free(&refresh_reply);
+                    refresh_ok = 0;
+                    break;
+                }
+                offset = refresh_reply.offset;
+                if (!(refresh_reply.flags & DTRG_REFRESH_MORE)) {
+                    uint16_t k = 0;
+                    if (snapshot) {
+                        while (k < applied_count) {
+                            if (applied[k].seen) { k++; continue; }
+                            remove_applied_peer(ifindex, &applied[k]);
+                            if (k + 1 < applied_count)
+                                memmove(&applied[k], &applied[k + 1],
+                                    (size_t)(applied_count - k - 1) *
+                                    sizeof(applied[0]));
+                            applied_count--;
+                        }
+                    }
+                    refresh_epoch = refresh_reply.epoch;
+                    offset = 0;
+                }
+                snapshot = snapshot ||
+                    !!(refresh_reply.flags & DTRG_REFRESH_SNAPSHOT);
+                {
+                    int more = !!(refresh_reply.flags & DTRG_REFRESH_MORE);
+                    dtrg_msg_free(&refresh_reply);
+                    if (!more) break;
+                }
+            } while (g_running);
+            if (refresh_ok) {
+                refresh_failures = 0;
+                result = 0;
+                if (config->once) break;
+                for (int waited = 0;
+                     waited < (config->refresh_interval_ms > 0 ?
+                               config->refresh_interval_ms : 1000) && g_running;
+                     waited += 100)
+                    usleep(100000);
+                continue;
+            }
+            if (!force_register && ++refresh_failures < 2) {
+                sleep(1);
+                continue;
+            }
+            have_lease = 0;
+            refresh_failures = 0;
+        }
 
         memset(&challenge, 0, sizeof(challenge));
         memset(&ack, 0, sizeof(ack));
@@ -1084,7 +1656,9 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             if (ifindex) dtun_link_delete_by_name(config->interface);
             int created_ifindex = dtun_link_create(
                 config->interface, local_outer, local_data_port, ack.node_id,
-                hub_control.sin_addr, ack.data_port);
+                hub_control.sin_addr, ack.data_port,
+                (uint32_t)config->probe_interval_ms,
+                (uint32_t)config->path_timeout_ms);
             if (created_ifindex <= 0) {
                 fprintf(stderr, "Failed to create Spoke interface: %s\n",
                         strerror(-created_ifindex));
@@ -1106,7 +1680,14 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             assigned_prefix = ack.prefix_len;
             hub_data_port = ack.data_port;
         }
-        if (hub_tunnel_id && hub_tunnel_id != ack.tunnel_id) {
+        /* Reaching a full authenticated registration while a Hub peer already
+         * exists means the lightweight lease failed (for example after a Hub
+         * restart).  The rebuilt Hub kernel peer starts a fresh transmit
+         * sequence, so retaining our old replay window would reject every
+         * probe until that sequence caught up.  Recreate the peer only at this
+         * authenticated lifecycle boundary; ordinary endpoint changes keep
+         * their sequence and replay state intact. */
+        if (hub_tunnel_id) {
             struct in_addr old_network = network_prefix(assigned_address,
                                                         assigned_prefix);
             (void)dtun_nl_route_del(ifindex, hub_tunnel_id, old_network,
@@ -1126,6 +1707,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             peer.raw_addr = hub_control.sin_addr;
             peer.udp_addr = hub_control.sin_addr;
             peer.udp_port = ack.data_port;
+            peer.dynamic_raw = 0;
             peer.has_key = has_psk;
             if (has_psk) memcpy(peer.key, psk, sizeof(peer.key));
             if (program_peer(&peer) < 0 ||
@@ -1150,6 +1732,12 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         requested_address = ack.address;
         requested_prefix = ack.prefix_len;
         config->node_id = ack.node_id;
+        memcpy(lease_token, ack.lease_token, sizeof(lease_token));
+        /* Force the first lightweight refresh to obtain a paginated snapshot;
+         * the immediately following SYNC is only a startup latency shortcut. */
+        refresh_epoch = 0;
+        refresh_counter = 0;
+        have_lease = 1;
         success = 1;
         registered_once = 1;
         result = 0;
@@ -1169,12 +1757,11 @@ attempt_done:
         if (config->once) break;
         if (!success)
             fprintf(stderr, "[dtund Spoke] Registration failed; retaining existing link and retrying\n");
-        for (int i = 0; i < (config->interval > 0 ? config->interval : 1) &&
-                        g_running; i++)
-            sleep(1);
+        if (g_running) sleep(1);
     }
 
 out:
+    if (route_fd >= 0) close(route_fd);
     if (sock >= 0) close(sock);
     if (ifindex && !(config->once && registered_once)) {
         dtun_link_delete_by_name(config->interface);

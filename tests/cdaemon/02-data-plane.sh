@@ -53,10 +53,10 @@ ip netns exec "$A" iptables -A OUTPUT -p udp -m comment --comment dtun-output -j
 ip netns exec "$A" iptables -A OUTPUT -p udp --dport 49000 -j ACCEPT
 sleep 1
 for i in $(seq 1 20); do
-	peer_get "$A" 100 | grep -q '"raw_up": true' && break
+	peer_get "$A" 100 | grep -q '"raw_up":true' && break
 	sleep 1
 done
-peer_get "$A" 100 | grep -q '"raw_up": true' && ok "raw_up true after probes" || fail "raw_up never became true"
+peer_get "$A" 100 | grep -q '"raw_up":true' && ok "raw_up true after probes" || fail "raw_up never became true"
 before=$(ipt_counters "$A")
 ip netns exec "$A" ping -c 20 -i 0.2 -W 1 "$HUB_I" >/dev/null 2>&1 || true
 after=$(ipt_counters "$A")
@@ -69,13 +69,13 @@ section "UDP fallback after clearing raw candidate"
 ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
 	--raw 0.0.0.0 --udp 172.30.91.1:49000
 # Path health is per side: the hub keeps replying over raw until its own
-# raw_seen for A expires (DTUN_PATH_TIMEOUT = 15s), and A rejects those raw
+# raw_seen for A expires (path_timeout_ms defaults to 3s), and A rejects those raw
 # replies because its raw candidate is now 0.0.0.0.  Wait for the hub side
 # to go stale before asserting UDP-only data.
 stale=0
 for i in $(seq 1 20); do
 	if ip netns exec "$HUB" "$CTL" peer-get --ifindex "$(ifindex "$HUB")" \
-		--tunnel-id 101 2>/dev/null | grep -q '"raw_up": false'; then
+		--format json --tunnel-id 101 2>/dev/null | grep -q '"raw_up":false'; then
 		stale=1
 		break
 	fi
@@ -100,14 +100,14 @@ else
 	ip netns exec "$A" iptables -L OUTPUT -v -n -x
 	fail "UDP tunnel traffic bypassed netfilter OUTPUT"
 fi
-peer_get "$A" 100 | grep -q '"raw_up": false' && ok "raw_up false" || fail "raw_up not false"
+peer_get "$A" 100 | grep -q '"raw_up":false' && ok "raw_up false" || fail "raw_up not false"
 
 section "raw recovery after restoring candidate"
 ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
 	--raw 172.30.91.1 --udp 172.30.91.1:49000
 recovered=0
 for i in $(seq 1 25); do
-	if peer_get "$A" 100 | grep -q '"raw_up": true'; then
+	if peer_get "$A" 100 | grep -q '"raw_up":true'; then
 		recovered=1
 		break
 	fi

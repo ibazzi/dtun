@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-contained DTRG v2 client used only by negative control-plane tests."""
+"""Self-contained DTRG client used only by negative control-plane tests."""
 import argparse
 import hashlib
 import hmac
@@ -9,7 +9,6 @@ import socket
 import struct
 
 MAGIC = b"DTRG"
-VERSION = 2
 INIT, CHALLENGE, CONFIRM, ACK = range(1, 5)
 TAG_LEN = 16
 
@@ -23,14 +22,14 @@ def authenticated(key, body):
 
 
 def pack_init(key, node_id, address, prefix, nonce):
-    body = struct.pack("!4sBBQ4sB4s16s", MAGIC, VERSION, INIT, node_id,
+    body = struct.pack("!4sBQ4sB4s16s", MAGIC, INIT, node_id,
                        ipaddress.IPv4Address(address).packed, prefix,
                        b"\0" * 4, nonce)
     return authenticated(key, body)
 
 
 def pack_confirm(key, challenge):
-    body = struct.pack("!4sBBQ4sB4s16s32s", MAGIC, VERSION, CONFIRM,
+    body = struct.pack("!4sBQ4sB4s16s32s", MAGIC, CONFIRM,
                        challenge["node_id"], challenge["address"],
                        challenge["prefix"], challenge["raw"],
                        challenge["nonce"], challenge["cookie"])
@@ -43,20 +42,20 @@ def parse(key, packet):
     body, actual = packet[:-TAG_LEN], packet[-TAG_LEN:]
     if not hmac.compare_digest(tag(key, body), actual):
         raise ValueError("bad HMAC")
-    magic, version, kind = struct.unpack_from("!4sBB", body)
-    if magic != MAGIC or version != VERSION:
+    magic, kind = struct.unpack_from("!4sB", body)
+    if magic != MAGIC:
         raise ValueError("unsupported protocol")
     if kind == CHALLENGE:
-        values = struct.unpack("!4sBBQ4sB4s16s32s", body)
-        return {"kind": kind, "node_id": values[3], "address": values[4],
-                "prefix": values[5], "raw": values[6], "nonce": values[7],
-                "cookie": values[8]}
+        values = struct.unpack("!4sBQ4sB4s16s32s", body)
+        return {"kind": kind, "node_id": values[2], "address": values[3],
+                "prefix": values[4], "raw": values[5], "nonce": values[6],
+                "cookie": values[7]}
     if kind == ACK:
-        values = struct.unpack("!4sBBQII4sBH16s", body)
-        return {"kind": kind, "node_id": values[3],
-                "tunnel_id": values[4], "remote_tunnel_id": values[5],
-                "address": values[6], "prefix": values[7],
-                "data_port": values[8], "nonce": values[9]}
+        values = struct.unpack("!4sBQII4sBH16s16sQ", body)
+        return {"kind": kind, "node_id": values[2],
+                "tunnel_id": values[3], "remote_tunnel_id": values[4],
+                "address": values[5], "prefix": values[6],
+                "data_port": values[7], "nonce": values[8]}
     return {"kind": kind}
 
 

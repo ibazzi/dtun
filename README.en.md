@@ -19,12 +19,14 @@ synchronization.
   every peer. The default MTU is 1200.
 - Raw IP as the preferred path, followed by a configured UDP endpoint.
 - Authenticated UDP frames can update the source `IP:port` learned through NAT.
-- The DTRG v2 control plane supports periodic registration, persistent Hub
+- The DTRG control plane supports lightweight refresh, candidate
+  generations, persistent Hub
   state, offline lease expiry, and `/32` direct-peer synchronization between
   Spokes.
 - C `dtund` and `dtunctl` are the only supported control plane; Python remains
   only in packet-generation test helpers.
 - Both Raw and UDP outer output pass through IPv4 local-output/netfilter.
+- `dtunctl peer-list` dumps all peers, and peer commands support JSON output.
 
 The current release effectively supports IPv4 forwarding only. It has no
 encryption, key rotation, live configuration reload, or general outer-frame

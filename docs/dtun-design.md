@@ -2,8 +2,8 @@
 
 [English](dtun-design.en.md) | **简体中文**
 
-本文描述当前源码实现，而不是未来规划。数据面线协议版本为 1，注册控制协议为
-C-only DTRG v2；旧 C/Python 控制面不受支持，也不能与当前版本混跑。
+本文描述当前源码实现，而不是未来规划。数据面和 C-only DTRG 控制协议均仍在开发中，
+只支持当前源码构建出的 Hub/Spoke，旧实现不保证兼容。
 
 ## 1. 目标与非目标
 
@@ -20,7 +20,7 @@ dtun 将一个无 ARP 的点到点 L3 netdevice 映射到 Raw IPv4 或 UDP 外�
 dtund ── RTNL ──> dtun link
   │
   ├── Generic Netlink DTUN ──> peer / prefix / status
-  └── UDP 49001 DTRG v2 ──> Hub/Spoke registration and SYNC
+  └── UDP 49001 DTRG ──> Hub/Spoke registration、REFRESH and SYNC
 
 inner IPv4 ──> dtun.ko ──> Raw IPv4/253 or UDP data frame
 ```
@@ -30,7 +30,7 @@ inner IPv4 ──> dtun.ko ──> Raw IPv4/253 or UDP data frame
 - RTNL link type `dtun`；必需属性为 `local`、`udp_port`、`node_id`，可选属性为
   `hub`、`hub_port`；
 - Generic Netlink family `DTUN` version 1；实现 `PEER_ADD`、`PEER_SET`、
-  `PEER_DEL`、`PEER_GET`、`ROUTE_ADD` 和 `ROUTE_DEL`；
+  `PEER_DEL`、`PEER_GET`、`PEER_LIST`、`REBIND`、`ROUTE_ADD` 和 `ROUTE_DEL`；
 - multicast group `events`，在认证 UDP 来源被观察后发送候选通知。
 
 UAPI 枚举中预留了 `STATS_GET`，但当前没有注册对应操作。接口统计通过标准
@@ -81,7 +81,7 @@ daemon 不订阅该事件，而是在生成 SYNC 前调用 `PEER_GET` 获取最�
 全 peer 泛洪；没有 peer 时同样丢包。每份副本使用对应 peer 独立的 tunnel ID、序列号、
 HMAC 和路径选择。
 
-每 5 秒的 workqueue 对每个 peer：
+默认每 1 秒的 workqueue 对每个 peer：
 
 - 有 Raw 地址时发送 Raw PROBE；
 - 有 UDP `IP:port` 时发送 UDP PROBE；
@@ -89,13 +89,12 @@ HMAC 和路径选择。
 
 DATA 的实际选择规则为：
 
-1. `raw_addr` 非零，且 `raw_seen` 距当前不足 15 秒：选择 Raw IPv4 253；
-2. 否则 `udp_addr` 和 `udp_port` 非零，且 `udp_seen` 距当前不足 15 秒（直连打洞成功）：选择直连 UDP；
-3. 否则使用接口的 `hub_addr`/`hub_port` 发送至 Hub 中转（打洞未成功或直连断开时自动回退至 Hub 中转）。
+1. 最近 3 秒内完成认证往返的 Raw 地址；
+2. 最近 3 秒内直接观察到认证来源的 UDP 地址；
+3. 否则改用节点 1 的 Hub peer 重新封装，Hub 按内层路由继续转发。
 
-因此 `raw_up` 参与路径选择，而 `udp_up` 当前只是状态输出。所谓 relay 也只是目的
-端点回退：原始 node 和 tunnel ID 不变，Hub 不会为任意直连会话解包或重写该帧。
-控制面提供的地址池路由配合 Hub 内层 IPv4 forwarding 才是 spoke 间的间接路径。
+Raw 和直连 UDP 都必须处于活跃窗口。两者失效时使用 Hub peer 的 tunnel ID 和 HMAC
+重新封装，Hub 解包后依靠地址池路由及 IPv4 forwarding 转发到目标 Spoke。
 
 ## 6. 外层发送与生命周期
 
@@ -111,9 +110,9 @@ UDP 接收复用绑定在 `local_outer_ip:data_port` 的内核 encapsulation soc
 peer 使用引用计数保护并发收发与配置更新。删除设备时先禁用 TX、同步取消 probe、
 断开 UDP 回调并等待 RCU/network 读侧结束，再释放 peer 和 socket。
 
-## 7. DTRG v2 注册协议
+## 7. DTRG 注册与刷新协议
 
-DTRG 运行在 Hub 控制 UDP 端口上。所有消息以 magic `DTRG`、版本 2 和类型开始，
+DTRG 运行在 Hub 控制 UDP 端口上。所有消息以 magic `DTRG` 和类型开始，
 结尾为覆盖整个消息体的 16 字节截断 HMAC-SHA-256。多字节字段为网络字节序。
 
 ```text
@@ -121,21 +120,25 @@ Spoke                         Hub
   |---- INIT ----------------->|  node/address/raw/nonce
   |<--- CHALLENGE -------------|  回显字段 + 无状态 cookie
   |---- CONFIRM -------------->|  回显 cookie
-  |<--- ACK --------------------|  节点、双向 ID、地址、Hub 数据端口
+  |<--- ACK --------------------|  节点、双向 ID、地址、lease token、epoch
   |<--- SYNC -------------------|  可用的其他 spoke 直连记录
+  |---- REFRESH --------------->|  token、计数器、已应用 epoch、分页偏移
+  |<--- REFRESH_ACK ------------|  自身端点、epoch、候选增量/快照页
 ```
 
 | 消息 | 总长度 | 关键字段 |
 | --- | ---: | --- |
-| INIT | 55 B | node、请求地址/前缀、Raw 声明、16 B nonce |
-| CHALLENGE | 87 B | INIT 字段 + 32 B cookie |
-| CONFIRM | 87 B | CHALLENGE 回显 |
-| ACK | 61 B | node、本地/远端 tunnel ID、地址/前缀、Hub 数据端口、nonce |
-| SYNC | `48 + 30 × N` B | node、nonce、数量、N 条定长 peer 记录 |
+| INIT | 54 B | node、请求地址/前缀、Raw 声明、16 B nonce |
+| CHALLENGE | 86 B | INIT 字段 + 32 B cookie |
+| CONFIRM | 86 B | CHALLENGE 回显 |
+| ACK | 84 B | node、双向 tunnel ID、地址、端口、nonce、lease token、epoch |
+| SYNC | `47 + 39 × N` B | node、nonce、数量、N 条 peer 记录 |
+| REFRESH | 63 B | node、lease token、计数器、epoch、分页偏移 |
+| REFRESH_ACK | `72 + 39 × N` B | 自身数据端点、epoch、分页标志及候选记录 |
 
-每条 SYNC peer 记录包含 node ID、本地/远端 tunnel ID、内层 IPv4、Raw IPv4 和 UDP
-`IPv4:port`。peer 数量上限为 128，控制包缓冲上限为 8192 字节。解析器严格检查
-magic、版本、精确长度、数量和 HMAC。
+每条 peer 记录包含 node ID、双向 tunnel ID、内层 IPv4、Raw/UDP 候选、generation
+和在线/tombstone 标志。REFRESH_ACK 限制为 1200 字节并分页；解析器严格检查
+magic、类型、精确长度、数量和 HMAC。
 
 Spoke 为每次尝试生成新 nonce，并要求 CHALLENGE/ACK 来自配置的 Hub 控制端点且
 回显字段匹配。ACK 有效即表示本次注册成功；紧随其后的 SYNC 若缺失或无效会被忽略，
@@ -146,15 +149,16 @@ Raw 声明、nonce 和时间桶；当前桶及前一时间桶有效。
 
 ## 8. Hub 分配、状态与直连同步
 
-Hub 状态 magic 为 `DTS2`、版本为 2，持久化 cookie 密钥、下一个 node/tunnel ID、
+Hub 本地状态带 magic 和格式校验，持久化 cookie 密钥、下一个 node/tunnel ID、
 最多 128 个节点记录及所有已分配 spoke-pair 会话。每个 Hub↔Spoke 和每个 Spoke 对
 都有独立的双向 tunnel ID，分配从 100 开始并持久化。
 
-Hub 每秒根据最后一次成功 CONFIRM 更新的 `last_seen` 检查节点租约。超过
-`peer_timeout`（默认 60 秒）后，删除 Hub 内核 peer、节点记录及引用该节点的所有
-spoke-pair session，并原子保存状态。仍在线的 Spoke 在下一次周期注册获得不含过期
-节点的 SYNC，`apply_sync` 随即删除本地直连 peer。重新注册的过期节点会获得新的
-tunnel/session ID。稳定部署仍应配置固定非 0 node ID。
+Hub 根据有效 CONFIRM/REFRESH 更新 `last_seen`。超过 `peer_timeout` 后只移除活跃
+内核路径并标记离线，地址和 tunnel/session ID 默认继续保留 86400 秒；保留期内相同
+node ID 重连会复用原会话。保留期结束后删除记录并通过 tombstone 传播。
+Hub 每次启动都会轮换持久化 lease token；收到旧 token 的认证 REFRESH 时返回
+`RE_REGISTER` 标志，但不返回新 token。Spoke 随即完成完整注册，并在这个经过认证的
+daemon 生命周期边界重建 Hub peer 和防重放窗口。普通出口候选变化不会重置序列号。
 
 状态以当前 C 结构的二进制布局保存，因此适合同一平台上的 daemon 重启恢复，不应
 当作跨架构交换格式。保存使用同目录 `.tmp` 文件、刷新、`fsync` 和原子重命名。
@@ -170,8 +174,9 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - Hub 启动时读取并验证状态，创建接口；正常信号退出时删除接口。
 - Spoke 首次有效 ACK 后创建接口和 Hub peer；其本地 UDP 端口来自自身 `data_port`，
   Hub 目的数据端口来自 ACK。
-- 常驻 Spoke 周期重注册。失败时保留现有接口；Hub 状态保留的重启通常能在一个周期
-  内恢复。分配地址、node、前缀或 Hub 数据端口变化时，接口可能被重建。
+- 常驻 Spoke 每秒 REFRESH；失败时保留现有接口。Hub 重启时认证 `RE_REGISTER` 回复
+  跳过额外超时等待，完整注册复用持久化身份和 session。分配地址、node、前缀或 Hub
+  数据端口变化时，接口可能被重建。
 - `once=true` 在第一次尝试后退出：成功则保留接口，失败则返回非零且不保留接口。
 - SIGINT、SIGTERM 和 SIGHUP 都表示停止；当前没有配置热重载。
 - daemon 创建接口前会删除同名接口，并假定该接口由自身独占管理。
@@ -184,10 +189,10 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - Raw IP 253 通常不能穿越 NAT，并可能被运营商或云安全组过滤。
 - UDP 选择目前不以 `udp_up` 为门槛，失效端点不会自动跳到通用外层 relay。
 - Hub 间接转发依赖宿主 IPv4 forwarding 和 FORWARD 防火墙策略。
-- DTRG v2 只支持当前 C Hub/Spoke；旧 C/Python 控制面明确不兼容，升级时必须同步
+- DTRG 仍在开发中，只支持相同源码版本构建的 C Hub/Spoke；协议调整时必须同步部署
   替换全部控制面节点。
 - Hub 状态是带版本的本地二进制结构，不保证跨 ABI/架构可移植。
 - Hub 没有显式注销消息；掉线清理由注册租约超时驱动，通知随其他 Spoke 的周期 SYNC
   传播。
-- `dtunctl` 没有 peer-list 或统计命令；预留的 `STATS_GET` 尚未实现。
+- `dtunctl peer-list` 通过 Generic Netlink dump 枚举 peer；预留的 `STATS_GET` 尚未实现。
 - 隧道没有拥塞控制、PMTU 发现、分片重组策略或生产级密钥管理。

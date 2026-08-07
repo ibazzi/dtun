@@ -18,6 +18,13 @@
 static int genl_fd = -1;
 static uint16_t dtun_genl_family_id = 0;
 static uint32_t genl_seq = 0;
+/* Modules are system-wide while dtund instances may live in independent
+ * network namespaces.  Teardown must not unload a module that this process
+ * merely found already present. */
+static int dtun_module_loaded_here = 0;
+
+static int pack_dtun_attr(char *buf, size_t maxlen, int type,
+                          const void *val, size_t len);
 
 static int add_attr(struct nlmsghdr *n, size_t maxlen, int type, const void *data, int alen) {
     int len = RTA_LENGTH(alen);
@@ -99,6 +106,133 @@ static int genl_request(uint16_t family, uint8_t cmd, const void *attrs, size_t 
     }
 }
 
+static int parse_peer_status(const void *payload, size_t payload_len,
+                             dtun_nl_peer_status_t *status) {
+    const struct genlmsghdr *gmsg = payload;
+    struct rtattr *attr;
+    int len;
+
+    if (payload_len < sizeof(*gmsg)) return -EPROTO;
+    memset(status, 0, sizeof(*status));
+    attr = (struct rtattr *)((char *)payload + sizeof(*gmsg));
+    len = (int)(payload_len - sizeof(*gmsg));
+    while (RTA_OK(attr, len)) {
+        switch (attr->rta_type) {
+        case DTUN_A_IFINDEX: status->ifindex = *(uint32_t *)RTA_DATA(attr); break;
+        case DTUN_A_TUNNEL_ID: status->tunnel_id = *(uint32_t *)RTA_DATA(attr); break;
+        case DTUN_A_REMOTE_TUNNEL_ID: status->remote_tunnel_id = *(uint32_t *)RTA_DATA(attr); break;
+        case DTUN_A_NODE_ID: memcpy(&status->node_id, RTA_DATA(attr), sizeof(status->node_id)); break;
+        case DTUN_A_RAW_ADDR: memcpy(&status->raw_addr.s_addr, RTA_DATA(attr), 4); break;
+        case DTUN_A_RAW_VALIDATED_ADDR: memcpy(&status->raw_validated_addr.s_addr, RTA_DATA(attr), 4); break;
+        case DTUN_A_UDP_ADDR:
+        case DTUN_A_RENDEZVOUS_UDP_ADDR: memcpy(&status->udp_addr.s_addr, RTA_DATA(attr), 4); break;
+        case DTUN_A_UDP_PORT:
+        case DTUN_A_RENDEZVOUS_UDP_PORT: status->udp_port = ntohs(*(uint16_t *)RTA_DATA(attr)); break;
+        case DTUN_A_DIRECT_UDP_ADDR: memcpy(&status->direct_udp_addr.s_addr, RTA_DATA(attr), 4); break;
+        case DTUN_A_DIRECT_UDP_PORT: status->direct_udp_port = ntohs(*(uint16_t *)RTA_DATA(attr)); break;
+        case DTUN_A_CANDIDATE_GENERATION: memcpy(&status->candidate_generation, RTA_DATA(attr), sizeof(status->candidate_generation)); break;
+        case DTUN_A_DYNAMIC_RAW: status->dynamic_raw = *(uint8_t *)RTA_DATA(attr); break;
+        case DTUN_A_RAW_UP: status->raw_up = *(uint8_t *)RTA_DATA(attr); break;
+        case DTUN_A_UDP_UP: status->udp_up = *(uint8_t *)RTA_DATA(attr); break;
+        case DTUN_A_SELECTED_PATH: status->selected_path = *(uint8_t *)RTA_DATA(attr); break;
+        }
+        attr = RTA_NEXT(attr, len);
+    }
+    return status->ifindex && status->tunnel_id ? 0 : -EPROTO;
+}
+
+static int genl_peer_dump(uint32_t ifindex, dtun_nl_peer_status_t **statuses,
+                          size_t *status_count) {
+    char attrs[64];
+    int attrs_len = 0;
+    char request[256];
+    struct nlmsghdr *nlh = (struct nlmsghdr *)request;
+    struct genlmsghdr *genl = (struct genlmsghdr *)(request + NLMSG_HDRLEN);
+    struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+    uint32_t seq;
+    dtun_nl_peer_status_t *items = NULL;
+    size_t count = 0, capacity = 0;
+
+    if (!statuses || !status_count) return -EINVAL;
+    *statuses = NULL;
+    *status_count = 0;
+    attrs_len += pack_dtun_attr(attrs + attrs_len, sizeof(attrs) - attrs_len,
+                                DTUN_A_IFINDEX, &ifindex, sizeof(ifindex));
+    memset(request, 0, sizeof(request));
+    nlh->nlmsg_len = NLMSG_LENGTH(sizeof(*genl) + attrs_len);
+    nlh->nlmsg_type = dtun_genl_family_id;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    nlh->nlmsg_seq = seq = ++genl_seq;
+    nlh->nlmsg_pid = getpid();
+    genl->cmd = DTUN_CMD_PEER_LIST;
+    genl->version = 1;
+    memcpy(request + NLMSG_HDRLEN + sizeof(*genl), attrs, attrs_len);
+    if (sendto(genl_fd, request, nlh->nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof(sa)) < 0)
+        return -errno;
+
+    for (;;) {
+        char buffer[16384];
+        ssize_t received = recv(genl_fd, buffer, sizeof(buffer), 0);
+        struct nlmsghdr *msg;
+        int remaining;
+
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            free(items);
+            return -errno;
+        }
+        remaining = (int)received;
+        for (msg = (struct nlmsghdr *)buffer; NLMSG_OK(msg, remaining);
+             msg = NLMSG_NEXT(msg, remaining)) {
+            dtun_nl_peer_status_t status;
+            int err;
+
+            if (msg->nlmsg_seq != seq ||
+                (msg->nlmsg_pid != 0 && msg->nlmsg_pid != (uint32_t)getpid()))
+                continue;
+            if (msg->nlmsg_type == NLMSG_DONE) {
+                if (msg->nlmsg_flags & NLM_F_DUMP_INTR) {
+                    free(items);
+                    return -EINTR;
+                }
+                *statuses = items;
+                *status_count = count;
+                return 0;
+            }
+            if (msg->nlmsg_type == NLMSG_ERROR) {
+                struct nlmsgerr *nlerr = NLMSG_DATA(msg);
+                err = nlerr->error ? nlerr->error : -EPROTO;
+                free(items);
+                return err;
+            }
+            if (msg->nlmsg_type != dtun_genl_family_id) continue;
+            err = parse_peer_status(NLMSG_DATA(msg),
+                                    msg->nlmsg_len - NLMSG_HDRLEN, &status);
+            if (err < 0) {
+                free(items);
+                return err;
+            }
+            if (count == capacity) {
+                size_t next = capacity ? capacity * 2 : 16;
+                dtun_nl_peer_status_t *grown;
+                if (next > 65536) {
+                    free(items);
+                    return -E2BIG;
+                }
+                grown = realloc(items, next * sizeof(*items));
+                if (!grown) {
+                    free(items);
+                    return -ENOMEM;
+                }
+                items = grown;
+                capacity = next;
+            }
+            items[count++] = status;
+        }
+    }
+}
+
 static uint16_t genl_resolve_family(const char *name) {
     char attrs[128];
     memset(attrs, 0, sizeof(attrs));
@@ -166,7 +300,8 @@ uint32_t dtun_link_get_ifindex(const char *ifname) {
 
 int dtun_link_create(const char *ifname, struct in_addr local_addr,
                      uint16_t udp_port, uint64_t node_id,
-                     struct in_addr hub_addr, uint16_t hub_port) {
+                     struct in_addr hub_addr, uint16_t hub_port,
+                     uint32_t probe_interval_ms, uint32_t path_timeout_ms) {
     uint32_t existing = dtun_link_get_ifindex(ifname);
     if (existing > 0) {
         dtun_link_delete_by_name(ifname);
@@ -198,6 +333,10 @@ int dtun_link_create(const char *ifname, struct in_addr local_addr,
             uint16_t uport = htons(udp_port);
             add_attr(n, sizeof(buf), IFLA_DTUN_UDP_PORT, &uport, 2);
             add_attr(n, sizeof(buf), IFLA_DTUN_NODE_ID, &node_id, 8);
+            add_attr(n, sizeof(buf), IFLA_DTUN_PROBE_INTERVAL_MS,
+                     &probe_interval_ms, sizeof(probe_interval_ms));
+            add_attr(n, sizeof(buf), IFLA_DTUN_PATH_TIMEOUT_MS,
+                     &path_timeout_ms, sizeof(path_timeout_ms));
             if (hub_addr.s_addr) {
                 uint16_t hport = htons(hub_port);
                 add_attr(n, sizeof(buf), IFLA_DTUN_HUB, &hub_addr.s_addr, 4);
@@ -325,7 +464,8 @@ static int pack_dtun_attr(char *buf, size_t maxlen, int type, const void *val, s
 }
 
 int dtun_nl_peer_add(const dtun_nl_peer_info_t *peer) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[512];
     int off = 0;
@@ -341,12 +481,19 @@ int dtun_nl_peer_add(const dtun_nl_peer_info_t *peer) {
     if (peer->has_key) {
         off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_KEY, peer->key, 32);
     }
+    uint8_t dynamic_raw = peer->dynamic_raw ? 1 : 0;
+    if (peer->has_dynamic_raw)
+        off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_DYNAMIC_RAW, &dynamic_raw, 1);
+    if (peer->has_generation)
+        off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_CANDIDATE_GENERATION,
+                              &peer->candidate_generation, sizeof(peer->candidate_generation));
 
     return genl_request(dtun_genl_family_id, DTUN_CMD_PEER_ADD, attrs, off, NULL, NULL);
 }
 
 int dtun_nl_peer_set(const dtun_nl_peer_info_t *peer) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[512];
     int off = 0;
@@ -363,12 +510,19 @@ int dtun_nl_peer_set(const dtun_nl_peer_info_t *peer) {
     if (peer->has_key) {
         off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_KEY, peer->key, 32);
     }
+    uint8_t dynamic_raw = peer->dynamic_raw ? 1 : 0;
+    if (peer->has_dynamic_raw)
+        off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_DYNAMIC_RAW, &dynamic_raw, 1);
+    if (peer->has_generation)
+        off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_CANDIDATE_GENERATION,
+                              &peer->candidate_generation, sizeof(peer->candidate_generation));
 
     return genl_request(dtun_genl_family_id, DTUN_CMD_PEER_SET, attrs, off, NULL, NULL);
 }
 
 int dtun_nl_peer_del(uint32_t ifindex, uint32_t tunnel_id) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[64];
     int off = 0;
@@ -379,7 +533,8 @@ int dtun_nl_peer_del(uint32_t ifindex, uint32_t tunnel_id) {
 }
 
 int dtun_nl_peer_get(uint32_t ifindex, uint32_t tunnel_id, dtun_nl_peer_status_t *status) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[64];
     int off = 0;
@@ -391,30 +546,30 @@ int dtun_nl_peer_get(uint32_t ifindex, uint32_t tunnel_id, dtun_nl_peer_status_t
     int res = genl_request(dtun_genl_family_id, DTUN_CMD_PEER_GET, attrs, off, reply, &reply_len);
     if (res < 0) return res;
 
-    memset(status, 0, sizeof(*status));
-    struct genlmsghdr *gmsg = (struct genlmsghdr *)reply;
-    struct rtattr *attr = (struct rtattr *)((char *)gmsg + sizeof(struct genlmsghdr));
-    int len = reply_len - sizeof(struct genlmsghdr);
+    return parse_peer_status(reply, reply_len, status);
+}
 
-    while (RTA_OK(attr, len)) {
-        switch (attr->rta_type) {
-        case DTUN_A_IFINDEX: status->ifindex = *(uint32_t *)RTA_DATA(attr); break;
-        case DTUN_A_TUNNEL_ID: status->tunnel_id = *(uint32_t *)RTA_DATA(attr); break;
-        case DTUN_A_REMOTE_TUNNEL_ID: status->remote_tunnel_id = *(uint32_t *)RTA_DATA(attr); break;
-        case DTUN_A_NODE_ID: status->node_id = *(uint64_t *)RTA_DATA(attr); break;
-        case DTUN_A_RAW_ADDR: memcpy(&status->raw_addr.s_addr, RTA_DATA(attr), 4); break;
-        case DTUN_A_UDP_ADDR: memcpy(&status->udp_addr.s_addr, RTA_DATA(attr), 4); break;
-        case DTUN_A_UDP_PORT: status->udp_port = ntohs(*(uint16_t *)RTA_DATA(attr)); break;
-        case DTUN_A_RAW_UP: status->raw_up = *(uint8_t *)RTA_DATA(attr); break;
-        case DTUN_A_UDP_UP: status->udp_up = *(uint8_t *)RTA_DATA(attr); break;
-        }
-        attr = RTA_NEXT(attr, len);
-    }
-    return 0;
+int dtun_nl_peer_list(uint32_t ifindex, dtun_nl_peer_status_t **statuses,
+                      size_t *count) {
+    int err = dtun_nl_init();
+    if (err < 0) return err;
+    return genl_peer_dump(ifindex, statuses, count);
+}
+
+int dtun_nl_rebind(uint32_t ifindex) {
+    char attrs[64];
+    int off = 0;
+    int err = dtun_nl_init();
+    if (err < 0) return err;
+    off += pack_dtun_attr(attrs + off, sizeof(attrs) - off,
+                          DTUN_A_IFINDEX, &ifindex, sizeof(ifindex));
+    return genl_request(dtun_genl_family_id, DTUN_CMD_REBIND,
+                        attrs, off, NULL, NULL);
 }
 
 int dtun_nl_route_add(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefix, uint8_t prefix_len) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[64];
     int off = 0;
@@ -427,7 +582,8 @@ int dtun_nl_route_add(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefi
 }
 
 int dtun_nl_route_del(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefix, uint8_t prefix_len) {
-    if (dtun_nl_init() < 0) return -1;
+    int init_error = dtun_nl_init();
+    if (init_error < 0) return init_error;
 
     char attrs[64];
     int off = 0;
@@ -453,6 +609,7 @@ int dtun_module_ensure_loaded(void) {
     }
 
     if (access("/sys/module/dtun", F_OK) == 0) {
+        dtun_module_loaded_here = 1;
         printf("[dtund] Kernel module 'dtun' loaded successfully.\n");
         fflush(stdout);
         return 0;
@@ -463,7 +620,7 @@ int dtun_module_ensure_loaded(void) {
 }
 
 void dtun_module_unload_if_needed(void) {
-    if (access("/sys/module/dtun", F_OK) != 0) {
+    if (!dtun_module_loaded_here || access("/sys/module/dtun", F_OK) != 0) {
         return;
     }
 
@@ -474,4 +631,5 @@ void dtun_module_unload_if_needed(void) {
     if (ret != 0) {
         ret = system("rmmod dtun 2>/dev/null"); (void)ret;
     }
+    dtun_module_loaded_here = 0;
 }

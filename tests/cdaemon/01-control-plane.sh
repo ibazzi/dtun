@@ -35,8 +35,8 @@ ping_ok "$B" "$A_I" 5 && ok "B -> A (hub relay) ping" || fail "B -> A ping"
 section "periodic SYNC installs direct spoke sessions"
 direct=0
 for i in $(seq 1 20); do
-	if peer_get "$A" 104 2>/dev/null | grep -q '"node_id": 3' &&
-	   peer_get "$B" 105 2>/dev/null | grep -q '"node_id": 2'; then
+	if peer_get "$A" 104 2>/dev/null | grep -q '"node_id":3' &&
+	   peer_get "$B" 105 2>/dev/null | grep -q '"node_id":2'; then
 		direct=1
 		break
 	fi
@@ -132,6 +132,6 @@ peer=$(peer_get "$A" 100)
 echo "$peer"
 echo "$peer" | grep -q '"tunnel_id": 100' && ok "tunnel_id persisted (100)" || fail "tunnel_id changed"
 echo "$peer" | grep -q '"remote_tunnel_id": 101' && ok "remote_tunnel_id persisted (101)" || fail "remote_tunnel_id changed"
-echo "$peer" | grep -q '"node_id": 1' && ok "hub node id persisted" || fail "hub node id changed"
+echo "$peer" | grep -q '"node_id":1' && ok "hub node id persisted" || fail "hub node id changed"
 
 summary

@@ -54,6 +54,7 @@ clean:
 check: ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state
 	./$(BUILD_DIR)/test_proto
 	./$(BUILD_DIR)/test_daemon_state
+	CTL=./$(BUILD_DIR)/dtunctl sh tests/test_cli.sh
 	sh -n tests/netns-smoke.sh tests/p2mp-netns.sh tests/cdaemon/lib.sh
 	bash -n tests/cdaemon/01-control-plane.sh tests/cdaemon/02-data-plane.sh \
 		tests/cdaemon/03-stability.sh tests/cdaemon/04-perf.sh \

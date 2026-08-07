@@ -26,7 +26,7 @@ cat > "$OUT/spoke-real.conf" <<EOF
 [global]
 mode = spoke
 interface = dtun0
-local_outer_ip = 192.168.1.6
+local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = 2
 address = 10.99.0.2/24
@@ -64,9 +64,9 @@ fi
 section "peer state (remote hub session)"
 IFACE=$(cat /sys/class/net/dtun0/ifindex 2>/dev/null || echo "")
 if [ -n "$IFACE" ]; then
-	peer=$("$CTL" peer-get --ifindex "$IFACE" --tunnel-id 100 2>/dev/null || true)
+	peer=$("$CTL" peer-get --format json --ifindex "$IFACE" --tunnel-id 100 2>/dev/null || true)
 	echo "$peer"
-	echo "$peer" | grep -q '"udp_up": true' && ok "hub UDP candidate up" || fail "hub UDP candidate down"
+	echo "$peer" | grep -q '"udp_up":true' && ok "hub UDP candidate up" || fail "hub UDP candidate down"
 else
 	fail "no dtun0 interface"
 fi

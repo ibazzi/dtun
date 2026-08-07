@@ -8,6 +8,10 @@ typedef struct {
     char *interface;        /* e.g., "dtun0" */
     char *local_outer_ip;   /* default "0.0.0.0" */
     int data_port;          /* default 49000 */
+    int probe_interval_ms;  /* default 1000 */
+    int path_timeout_ms;    /* default 3000 */
+    int refresh_interval_ms;/* default 1000 */
+    int fast_recovery;      /* default true */
     unsigned long node_id;  /* 0 means auto-allocate for spoke, 1 for hub default */
     char *address;          /* inner IPv4 CIDR, e.g., "10.99.0.2/24" or "0.0.0.0/24" */
     char *psk_hex;          /* 64 hex characters (32 bytes) */
@@ -19,6 +23,7 @@ typedef struct {
     char *state_file;       /* default "/var/lib/dtun/hub.state" */
     int cookie_seconds;     /* default 30 */
     int peer_timeout;       /* registration lease timeout, default 60 */
+    int identity_retention; /* stable allocation retention, default 86400 */
 
     /* Spoke-specific settings */
     char *hub_address;      /* Hub IP address */

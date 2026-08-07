@@ -30,6 +30,8 @@ static const struct nla_policy dtun_link_policy[IFLA_DTUN_MAX + 1] = {
 	[IFLA_DTUN_NODE_ID] = { .type = NLA_U64 },
 	[IFLA_DTUN_HUB] = { .type = NLA_U32 },
 	[IFLA_DTUN_HUB_PORT] = { .type = NLA_U16 },
+	[IFLA_DTUN_PROBE_INTERVAL_MS] = { .type = NLA_U32 },
+	[IFLA_DTUN_PATH_TIMEOUT_MS] = { .type = NLA_U32 },
 };
 
 static int dtun_tag(struct dtun_peer *peer, const struct dtun_hdr *hdr,
@@ -37,6 +39,15 @@ static int dtun_tag(struct dtun_peer *peer, const struct dtun_hdr *hdr,
 static int dtun_tag_skb(struct dtun_peer *peer, const struct dtun_hdr *hdr,
 			struct sk_buff *skb, u8 tag[DTUN_TAG_LEN]);
 static bool dtun_replay_ok(struct dtun_peer *peer, u64 seq);
+static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
+			  const u8 *payload, size_t payload_len,
+			  enum dtun_transport transport, __be32 addr,
+			  __be16 port);
+
+static unsigned long dtun_path_timeout(const struct dtun_dev *d)
+{
+	return msecs_to_jiffies(d->path_timeout_ms);
+}
 
 /*
  * crypto_memneq() is not exported by every supported 6.6+ kernel.  Keep the
@@ -84,6 +95,8 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
 	struct dtun_peer *peer = NULL;
 	u8 tag[DTUN_TAG_LEN];
 	u64 src_node, dst_node;
+	bool endpoint_changed = false;
+	bool reply_probe = false;
 	int err;
 
 	if (!pskb_may_pull(skb, sizeof(*hdr)))
@@ -126,20 +139,35 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
 		goto drop_unlock;
 	}
 	if (transport == DTUN_TRANSPORT_RAW)
+	{
+		peer->raw_validated_addr = src;
 		peer->raw_seen = jiffies;
+	}
 	else {
-		peer->udp_seen = jiffies;
-		if (src != d->hub_addr || port != d->hub_port) {
+		if (peer->node_id == 1 || src != d->hub_addr ||
+		    port != d->hub_port) {
 			/* Learn the authenticated source port too: a NAT'd spoke's
 			 * public mapping is only observable from inbound frames.  The
 			 * configured Hub relay endpoint is kept stable. */
-			peer->udp_port = port;
-			peer->udp_addr = src;
+			endpoint_changed = peer->direct_udp_addr != src ||
+				peer->direct_udp_port != port;
+			peer->direct_udp_port = port;
+			peer->direct_udp_addr = src;
+			peer->udp_seen = jiffies;
+			if (peer->dynamic_raw && peer->raw_addr != src) {
+				peer->raw_addr = src;
+				peer->raw_validated_addr = 0;
+				peer->raw_seen = 0;
+			}
 		}
 	}
+	reply_probe = hdr->type == DTUN_FRAME_PROBE;
 	spin_unlock_bh(&peer->state_lock);
-	if (transport == DTUN_TRANSPORT_UDP)
+	if (transport == DTUN_TRANSPORT_UDP && endpoint_changed)
 		dtun_genl_observed_peer(d, peer, src, port, transport);
+	if (reply_probe)
+		(void)dtun_send_path(d, peer, DTUN_FRAME_KEEPALIVE, NULL, 0,
+				     transport, src, port);
 	if (hdr->type != DTUN_FRAME_DATA) {
 		dtun_peer_put(peer);
 		kfree_skb(skb);
@@ -302,23 +330,32 @@ static enum dtun_transport dtun_choose_path(struct dtun_dev *d,
 					     __be32 *addr, __be16 *port)
 {
 	spin_lock_bh(&peer->state_lock);
-	if (peer->raw_addr && time_before(jiffies, peer->raw_seen + DTUN_PATH_TIMEOUT)) {
-		*addr = peer->raw_addr;
+	if (peer->raw_validated_addr &&
+	    time_before(jiffies, peer->raw_seen + dtun_path_timeout(d))) {
+		*addr = peer->raw_validated_addr;
 		*port = 0;
 		spin_unlock_bh(&peer->state_lock);
 		return DTUN_TRANSPORT_RAW;
 	}
-	if (peer->udp_addr && peer->udp_port &&
-	    time_before(jiffies, peer->udp_seen + DTUN_PATH_TIMEOUT)) {
+	if (peer->direct_udp_addr && peer->direct_udp_port &&
+	    time_before(jiffies, peer->udp_seen + dtun_path_timeout(d))) {
+		*addr = peer->direct_udp_addr;
+		*port = peer->direct_udp_port;
+		spin_unlock_bh(&peer->state_lock);
+		return DTUN_TRANSPORT_UDP;
+	}
+	/* The Hub is a stable rendezvous endpoint and must be usable before its
+	 * first authenticated reply.  Other rendezvous candidates are probe-only. */
+	if (peer->node_id == 1 && peer->udp_addr && peer->udp_port) {
 		*addr = peer->udp_addr;
 		*port = peer->udp_port;
 		spin_unlock_bh(&peer->state_lock);
 		return DTUN_TRANSPORT_UDP;
 	}
 	spin_unlock_bh(&peer->state_lock);
-	*addr = d->hub_addr;
-	*port = d->hub_port;
-	return DTUN_TRANSPORT_RELAY;
+	*addr = 0;
+	*port = 0;
+	return DTUN_TRANSPORT_UDP;
 }
 
 static int dtun_tag(struct dtun_peer *peer, const struct dtun_hdr *hdr,
@@ -576,6 +613,23 @@ static int dtun_send(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
 	return dtun_send_path(d, peer, type, payload, payload_len, transport, addr, port);
 }
 
+static int dtun_send_data(struct dtun_dev *d, struct dtun_peer *peer,
+			  const u8 *payload, size_t payload_len)
+{
+	struct dtun_peer *hub;
+	int err;
+
+	err = dtun_send(d, peer, DTUN_FRAME_DATA, payload, payload_len);
+	if (err != -ENETUNREACH || peer->node_id == 1)
+		return err;
+	hub = dtun_peer_get_by_node(d, 1);
+	if (!hub)
+		return err;
+	err = dtun_send(d, hub, DTUN_FRAME_DATA, payload, payload_len);
+	dtun_peer_put(hub);
+	return err;
+}
+
 static netdev_tx_t dtun_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dtun_dev *d = netdev_priv(dev);
@@ -625,7 +679,7 @@ static netdev_tx_t dtun_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 		kfree(peers);
 	} else {
-		err = dtun_send(d, peer, DTUN_FRAME_DATA, payload, skb->len);
+		err = dtun_send_data(d, peer, payload, skb->len);
 		dtun_peer_put(peer);
 		if (err)
 			DEV_STATS_INC(dev, tx_errors);
@@ -738,8 +792,10 @@ static void dtun_probe_work(struct work_struct *work)
 		peer = peers[i];
 		spin_lock_bh(&peer->state_lock);
 		raw_addr = peer->raw_addr;
-		udp_addr = peer->udp_addr;
-		udp_port = peer->udp_port;
+		udp_addr = peer->direct_udp_addr ? peer->direct_udp_addr :
+			peer->udp_addr;
+		udp_port = peer->direct_udp_addr ? peer->direct_udp_port :
+			peer->udp_port;
 		spin_unlock_bh(&peer->state_lock);
 		if (raw_addr)
 			dtun_send_path(d, peer, DTUN_FRAME_PROBE, NULL, 0,
@@ -755,7 +811,8 @@ static void dtun_probe_work(struct work_struct *work)
 	kfree(peers);
 
 reschedule:
-	schedule_delayed_work(&d->probe_work, DTUN_PROBE_INTERVAL);
+	schedule_delayed_work(&d->probe_work,
+			      msecs_to_jiffies(d->probe_interval_ms));
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
@@ -783,6 +840,15 @@ static int dtun_newlink(struct net *net, struct net_device *dev,
 	d->local_addr = nla_get_be32(data[IFLA_DTUN_LOCAL]);
 	d->udp_port = nla_get_be16(data[IFLA_DTUN_UDP_PORT]);
 	d->node_id = nla_get_u64(data[IFLA_DTUN_NODE_ID]);
+	d->probe_interval_ms = data[IFLA_DTUN_PROBE_INTERVAL_MS] ?
+		nla_get_u32(data[IFLA_DTUN_PROBE_INTERVAL_MS]) :
+		DTUN_PROBE_INTERVAL_MS;
+	d->path_timeout_ms = data[IFLA_DTUN_PATH_TIMEOUT_MS] ?
+		nla_get_u32(data[IFLA_DTUN_PATH_TIMEOUT_MS]) :
+		DTUN_PATH_TIMEOUT_MS;
+	if (d->probe_interval_ms < 100 || d->path_timeout_ms < 500 ||
+	    d->path_timeout_ms < 2 * d->probe_interval_ms)
+		return -EINVAL;
 	if (data[IFLA_DTUN_HUB])
 		d->hub_addr = nla_get_be32(data[IFLA_DTUN_HUB]);
 	if (data[IFLA_DTUN_HUB_PORT])
@@ -803,7 +869,8 @@ static int dtun_newlink(struct net *net, struct net_device *dev,
 		return err;
 	}
 	list_add_rcu(&d->global_list, &dtun_devices);
-	schedule_delayed_work(&d->probe_work, DTUN_PROBE_INTERVAL);
+	schedule_delayed_work(&d->probe_work,
+			      msecs_to_jiffies(d->probe_interval_ms));
 	return 0;
 }
 

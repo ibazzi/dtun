@@ -64,6 +64,12 @@ $IP netns exec dtun-b "$CTL" peer-add --ifindex "$IFB" --tunnel-id 100 --node-id
 $IP netns exec dtun-a "$CTL" route-add --ifindex "$IFA" --tunnel-id 100 --prefix 10.20.0.0/24
 $IP netns exec dtun-b "$CTL" route-add --ifindex "$IFB" --tunnel-id 100 --prefix 10.20.0.0/24
 
+# Generic Netlink multipart peer dump and both CLI formats.
+$IP netns exec dtun-a "$CTL" peer-list --ifindex "$IFA" | grep -q '^TUNNEL' || \
+	fail "peer-list human output missing table header"
+$IP netns exec dtun-a "$CTL" peer-list --ifindex "$IFA" --format json | \
+	grep -q '^\[{"ifindex":.*"tunnel_id":100' || fail "peer-list JSON output missing peer"
+
 # Initial probes make both transports healthy; Raw is then the preferred path.
 sleep 6
 $IP netns exec dtun-a ping -c 3 -W 1 10.20.0.2
@@ -74,9 +80,10 @@ $IP netns exec dtun-a ping -M do -c 3 -W 1 -s 1100 10.20.0.2
 # selected peer from a transmit-error counter.
 $IP netns exec dtun-a "$CTL" peer-add --ifindex "$IFA" --tunnel-id 101 --node-id 3 --raw 0.0.0.0 --udp 172.31.0.2:49001 --key "$KEY"
 $IP netns exec dtun-a "$CTL" route-add --ifindex "$IFA" --tunnel-id 101 --prefix 10.20.0.2/32
-$IP netns exec dtun-b python3 "$RECEIVER" --bind 172.31.0.2:49001 --dst-node 3 > /tmp/dtun-lpm.out &
+$IP netns exec dtun-b python3 "$RECEIVER" --bind 172.31.0.2:49001 \
+	--dst-node 3 --key "$KEY" > /tmp/dtun-lpm.out &
 receiver_pid=$!
-sleep 1
+sleep 2
 $IP netns exec dtun-a ping -c 1 -W 1 10.20.0.2 >/dev/null 2>&1 || true
 wait "$receiver_pid" || fail "longest-prefix DATA frame was not observed"
 [ "$(cat /tmp/dtun-lpm.out)" = 3 ] || fail "longest-prefix route selected the wrong peer"
@@ -125,8 +132,8 @@ send_frame --source-port 49002 --tunnel-id 100 --src-node 2 --dst-node 1 --seq 9
 sleep 1
 learn_rx=$(rx_packets)
 [ "$learn_rx" -eq $((before_rx + 1)) ] || fail "authenticated candidate update was not delivered"
-$IP netns exec dtun-a "$CTL" peer-get --ifindex "$IFA" --tunnel-id 100 | \
-	grep -q '"udp": "172.31.0.2:49002"' || fail "authenticated UDP source port was not learned"
+$IP netns exec dtun-a "$CTL" peer-get --format json --ifindex "$IFA" --tunnel-id 100 | \
+	grep -q '"direct_udp":"172.31.0.2:49002"' || fail "authenticated UDP source port was not learned"
 
 # Two advancing frames are delivered; their duplicate is rejected by the
 # receive replay window.

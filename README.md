@@ -15,7 +15,9 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 - 内层 IPv4 单播按最长前缀选择 peer；组播复制到所有 peer。默认 MTU 为 1200。
 - Raw IP 为首选路径；Raw 不可用时使用已配置的 UDP 端点。
 - 有效 UDP 帧通过 HMAC 后可以更新 NAT 映射得到的来源 `IP:port`。
-- DTRG v2 控制面支持周期重注册、Hub 状态持久化、掉线租约回收和 spoke 间 `/32` 直连同步。
+- DTRG 控制面支持轻量 REFRESH、候选代次、分页同步、Hub 状态持久化和 spoke 间 `/32` 直连同步。
+- 默认每秒探测、3 秒路径超时；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
+- `dtunctl peer-list --ifindex N` 可列出全部 peer；peer 命令支持 `--format json`。
 - C `dtund` 和 `dtunctl` 是唯一正式控制面；Python 仅用于测试造包。
 - Raw 和 UDP 外层发送均进入 IPv4 local-output/netfilter 路径。
 

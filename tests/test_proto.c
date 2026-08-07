@@ -23,6 +23,7 @@ int main(void)
     uint8_t key[DTRG_KEY_LEN];
     uint8_t nonce[DTRG_NONCE_LEN];
     uint8_t cookie[DTRG_COOKIE_LEN];
+    uint8_t lease_token[DTRG_LEASE_TOKEN_LEN];
     uint8_t packet[DTRG_MAX_PACKET];
     struct in_addr address, raw;
     dtrg_msg_t message;
@@ -32,6 +33,7 @@ int main(void)
     memset(key, 0x5a, sizeof(key));
     memset(nonce, 0xa5, sizeof(nonce));
     memset(cookie, 0x3c, sizeof(cookie));
+    memset(lease_token, 0x7e, sizeof(lease_token));
     CHECK(inet_pton(AF_INET, "10.99.0.2", &address) == 1);
     CHECK(inet_pton(AF_INET, "192.0.2.2", &raw) == 1);
 
@@ -61,11 +63,13 @@ int main(void)
     dtrg_msg_free(&message);
 
     length = dtrg_pack_ack(key, 2, 100, 101, address, 24, 49000,
-                           nonce, packet, sizeof(packet));
+                           nonce, lease_token, 9, packet, sizeof(packet));
     CHECK(length > 0);
     CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
     CHECK(message.kind == DTRG_ACK && message.tunnel_id == 100 &&
-          message.remote_tunnel_id == 101 && message.data_port == 49000);
+          message.remote_tunnel_id == 101 && message.data_port == 49000 &&
+          message.epoch == 9 &&
+          memcmp(message.lease_token, lease_token, sizeof(lease_token)) == 0);
     dtrg_msg_free(&message);
 
     memset(peers, 0, sizeof(peers));
@@ -76,6 +80,8 @@ int main(void)
     CHECK(inet_pton(AF_INET, "198.51.100.3", &peers[0].raw) == 1);
     peers[0].udp_addr = peers[0].raw;
     peers[0].udp_port = 41003;
+    peers[0].generation = 7;
+    peers[0].flags = DTRG_PEER_ONLINE;
     peers[1].node_id = 4;
     peers[1].tunnel_id = 104;
     peers[1].remote_tunnel_id = 105;
@@ -83,6 +89,8 @@ int main(void)
     CHECK(inet_pton(AF_INET, "203.0.113.4", &peers[1].raw) == 1);
     peers[1].udp_addr = peers[1].raw;
     peers[1].udp_port = 41004;
+    peers[1].generation = 8;
+    peers[1].flags = DTRG_PEER_ONLINE;
     length = dtrg_pack_sync(key, 2, nonce, peers, 2,
                             packet, sizeof(packet));
     CHECK(length > 0);
@@ -91,9 +99,35 @@ int main(void)
     CHECK(message.peers[0].node_id == 3 &&
           message.peers[0].tunnel_id == 102 &&
           message.peers[0].remote_tunnel_id == 103 &&
-          message.peers[0].udp_port == 41003);
+          message.peers[0].udp_port == 41003 &&
+          message.peers[0].generation == 7);
     CHECK(message.peers[1].node_id == 4 &&
           message.peers[1].address.s_addr == peers[1].address.s_addr);
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_refresh(key, 2, lease_token, 11, 9, 0,
+                               packet, sizeof(packet));
+    CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_REFRESH && message.counter == 11 &&
+          message.epoch == 9 && message.offset == 0);
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_refresh_ack(key, 2, lease_token, 11, 10, raw,
+                                   41002, DTRG_REFRESH_SNAPSHOT, 2,
+                                   peers, 2, packet, sizeof(packet));
+    CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_REFRESH_ACK && message.epoch == 10 &&
+          message.observed_port == 41002 && message.peer_count == 2 &&
+          message.peers[1].generation == 8);
+    dtrg_msg_free(&message);
+
+    length = dtrg_pack_refresh_ack(key, 2, lease_token, 11, 10, raw,
+                                   0, DTRG_REFRESH_RE_REGISTER, 0,
+                                   NULL, 0, packet, sizeof(packet));
+    CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_REFRESH_ACK &&
+          message.flags == DTRG_REFRESH_RE_REGISTER &&
+          message.peer_count == 0);
     dtrg_msg_free(&message);
 
     packet[12] ^= 1;

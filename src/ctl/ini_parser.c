@@ -25,6 +25,10 @@ void dtun_config_init(dtun_config_t *config) {
     config->interface = strdup_safe("dtun0");
     config->local_outer_ip = strdup_safe("0.0.0.0");
     config->data_port = 49000;
+    config->probe_interval_ms = 1000;
+    config->path_timeout_ms = 3000;
+    config->refresh_interval_ms = 1000;
+    config->fast_recovery = 1;
     config->node_id = 0;
     config->address = strdup_safe("0.0.0.0/24");
     config->psk_hex = NULL;
@@ -35,6 +39,7 @@ void dtun_config_init(dtun_config_t *config) {
     config->state_file = strdup_safe("/var/lib/dtun/hub.state");
     config->cookie_seconds = 30;
     config->peer_timeout = 60;
+    config->identity_retention = 86400;
 
     config->hub_address = NULL;
     config->hub_port = 49001;
@@ -107,6 +112,14 @@ int dtun_config_load(dtun_config_t *config, const char *filepath) {
             config->local_outer_ip = strdup_safe(val);
         } else if (strcmp(key, "data_port") == 0) {
             config->data_port = atoi(val);
+        } else if (strcmp(key, "probe_interval_ms") == 0) {
+            config->probe_interval_ms = atoi(val);
+        } else if (strcmp(key, "path_timeout_ms") == 0) {
+            config->path_timeout_ms = atoi(val);
+        } else if (strcmp(key, "refresh_interval_ms") == 0) {
+            config->refresh_interval_ms = atoi(val);
+        } else if (strcmp(key, "fast_recovery") == 0) {
+            config->fast_recovery = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         } else if (strcmp(key, "node_id") == 0) {
             config->node_id = strtoul(val, NULL, 10);
         } else if (strcmp(key, "address") == 0) {
@@ -130,6 +143,8 @@ int dtun_config_load(dtun_config_t *config, const char *filepath) {
             config->cookie_seconds = atoi(val);
         } else if (strcmp(key, "peer_timeout") == 0) {
             config->peer_timeout = atoi(val);
+        } else if (strcmp(key, "identity_retention") == 0) {
+            config->identity_retention = atoi(val);
         } else if (strcmp(key, "hub_address") == 0) {
             free(config->hub_address);
             config->hub_address = strdup_safe(val);

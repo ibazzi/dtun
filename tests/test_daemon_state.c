@@ -26,10 +26,14 @@ int main(void)
 
     dtun_config_init(&config);
     STATE_CHECK(config.peer_timeout == 60);
+    STATE_CHECK(config.identity_retention == 86400);
+    STATE_CHECK(config.probe_interval_ms == 1000);
+    STATE_CHECK(config.path_timeout_ms == 3000);
     STATE_CHECK(inet_pton(AF_INET, "10.99.0.1", &hub) == 1);
     STATE_CHECK(inet_pton(AF_INET, "10.99.0.2", &requested) == 1);
     hub_state_init();
     STATE_CHECK(hub_validate_state(&config, hub) == 0);
+
     record = hub_allocate_node(&config, hub, 2, requested, 24,
                                error, sizeof(error));
     STATE_CHECK(record != NULL && record->node_id == 2);
@@ -64,13 +68,23 @@ int main(void)
                 g_hub_state.nodes[0].tunnel_id == saved_tunnel);
     STATE_CHECK(hub_validate_state(&config, hub) == 0);
 
+
     memset(&legacy, 0, sizeof(legacy));
     memcpy(legacy.cookie_key, g_hub_state.cookie_key, 32);
     legacy.next_tunnel_id = g_hub_state.next_tunnel_id;
     legacy.next_node_id = g_hub_state.next_node_id;
     legacy.node_count = (int)g_hub_state.node_count;
-    memcpy(legacy.nodes, g_hub_state.nodes,
-           g_hub_state.node_count * sizeof(legacy.nodes[0]));
+    for (uint32_t i = 0; i < g_hub_state.node_count; i++) {
+        legacy.nodes[i].node_id = g_hub_state.nodes[i].node_id;
+        legacy.nodes[i].tunnel_id = g_hub_state.nodes[i].tunnel_id;
+        legacy.nodes[i].hub_tunnel_id = g_hub_state.nodes[i].hub_tunnel_id;
+        legacy.nodes[i].address = g_hub_state.nodes[i].address;
+        legacy.nodes[i].prefix_len = g_hub_state.nodes[i].prefix_len;
+        legacy.nodes[i].raw = g_hub_state.nodes[i].raw;
+        legacy.nodes[i].udp_addr = g_hub_state.nodes[i].udp_addr;
+        legacy.nodes[i].udp_port = g_hub_state.nodes[i].udp_port;
+        legacy.nodes[i].last_seen = g_hub_state.nodes[i].last_seen;
+    }
     file = fopen(path, "wb");
     STATE_CHECK(file != NULL);
     STATE_CHECK(fwrite(&legacy, sizeof(legacy), 1, file) == 1);
@@ -84,6 +98,30 @@ int main(void)
     STATE_CHECK(hub_session(g_hub_state.nodes[0].node_id,
                             g_hub_state.nodes[1].node_id) != NULL);
     STATE_CHECK(g_hub_state.session_count == 1);
+    {
+        dtrg_sync_peer_t page[REFRESH_PEERS_PER_PAGE];
+        uint8_t flags = 0;
+        uint16_t next = 0;
+        uint16_t count;
+        uint64_t before = g_hub_state.candidate_epoch;
+        g_hub_state.nodes[1].online = 1;
+        g_hub_state.nodes[1].generation = 3;
+        STATE_CHECK(inet_pton(AF_INET, "198.51.100.3",
+                              &g_hub_state.nodes[1].udp_addr) == 1);
+        g_hub_state.nodes[1].raw = g_hub_state.nodes[1].udp_addr;
+        g_hub_state.nodes[1].udp_port = 41003;
+        hub_note_change(g_hub_state.nodes[1].node_id);
+        memset(page, 0, sizeof(page));
+        count = build_refresh_page(g_hub_state.nodes[0].node_id, before, 0,
+                                   page, &flags, &next);
+        STATE_CHECK(count == 1 && page[0].node_id == 3 &&
+                    page[0].generation == 3 &&
+                    (page[0].flags & DTRG_PEER_ONLINE));
+        count = build_refresh_page(g_hub_state.nodes[0].node_id,
+                                   g_hub_state.candidate_epoch, 0,
+                                   page, &flags, &next);
+        STATE_CHECK(count == 0);
+    }
     g_hub_state.nodes[0].last_seen = 100;
     STATE_CHECK(!hub_node_expired(&g_hub_state.nodes[0], 160, 60));
     STATE_CHECK(hub_node_expired(&g_hub_state.nodes[0], 161, 60));

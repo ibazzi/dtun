@@ -3,9 +3,9 @@
 **English** | [简体中文](dtun-design.md)
 
 This document describes the current source implementation rather than future
-plans. The data-plane wire version is 1, and the registration protocol is
-C-only DTRG v2. Older C and Python control planes are unsupported and cannot be
-mixed with the current version.
+plans. The registration protocol is C-only DTRG and remains under development;
+only Hub and Spoke binaries built from the same source revision are expected to
+interoperate.
 
 ## 1. Goals and non-goals
 
@@ -24,7 +24,7 @@ relay, peer enumeration, and production-grade high availability.
 dtund ── RTNL ──> dtun link
   │
   ├── Generic Netlink DTUN ──> peer / prefix / status
-  └── UDP 49001 DTRG v2 ──> Hub/Spoke registration and SYNC
+  └── UDP 49001 DTRG ──> Hub/Spoke registration, REFRESH, and SYNC
 
 inner IPv4 ──> dtun.ko ──> Raw IPv4/253 or UDP data frame
 ```
@@ -98,7 +98,7 @@ track IGMP membership, so this is all-peer flooding; multicast is also dropped
 when there are no peers. Every copy uses that peer's own tunnel IDs, sequence,
 HMAC, and path selection.
 
-Every 5 seconds, a workqueue does the following for each peer:
+Every second by default, a workqueue does the following for each peer:
 
 - sends a Raw PROBE when a Raw address is configured;
 - sends a UDP PROBE when a UDP `IP:port` is configured;
@@ -106,18 +106,12 @@ Every 5 seconds, a workqueue does the following for each peer:
 
 The actual DATA selection rules are:
 
-1. Choose Raw IPv4 253 if `raw_addr` is nonzero and `raw_seen` is less than
-   15 seconds old.
-2. Otherwise choose direct UDP whenever `udp_addr` and `udp_port` are nonzero and
-   `udp_seen` is less than 15 seconds old (hole punching succeeded).
-3. Otherwise fall back to the link's `hub_addr` and `hub_port` for Hub relay when
-   direct UDP hole punching fails or times out.
-
-Thus, `raw_up` affects path selection while `udp_up` is currently status only.
-The so-called relay is also only a destination-endpoint fallback: the original
-node and tunnel IDs remain unchanged, and the Hub does not decapsulate or
-rewrite arbitrary direct-session frames. The indirect Spoke path is the address
-pool route combined with inner IPv4 forwarding on the Hub.
+1. Choose Raw IPv4 253 after an authenticated Raw round trip within the
+   three-second path timeout.
+2. Otherwise choose a directly observed authenticated UDP endpoint within the
+   same timeout.
+3. Otherwise re-encapsulate through the node-1 Hub peer; the Hub then forwards
+   according to the inner IPv4 route.
 
 ## 6. Outer transmission and lifecycle
 
@@ -138,10 +132,10 @@ updates. Device deletion first disables TX, synchronously cancels probes,
 disconnects the UDP callback, and waits for RCU/network readers before releasing
 peers and the socket.
 
-## 7. DTRG v2 registration protocol
+## 7. DTRG registration and refresh protocol
 
-DTRG runs over the Hub control UDP port. Every message starts with magic `DTRG`,
-version 2, and a type, and ends with a 16-byte truncated HMAC-SHA-256 over the
+DTRG runs over the Hub control UDP port. Every message starts with magic `DTRG`
+and a type, and ends with a 16-byte truncated HMAC-SHA-256 over the
 entire message body. Multibyte fields use network byte order.
 
 ```text
@@ -151,20 +145,24 @@ Spoke                         Hub
   |---- CONFIRM -------------->|  echoed cookie
   |<--- ACK --------------------|  node, bidirectional IDs, address, Hub data port
   |<--- SYNC -------------------|  available direct records for other Spokes
+  |---- REFRESH --------------->|  lease token, counter, epoch, page offset
+  |<--- REFRESH_ACK ------------|  reflected endpoint and candidate delta/page
 ```
 
 | Message | Total length | Key fields |
 | --- | ---: | --- |
-| INIT | 55 B | node, requested address/prefix, Raw claim, 16 B nonce |
-| CHALLENGE | 87 B | INIT fields + 32 B cookie |
-| CONFIRM | 87 B | CHALLENGE echo |
-| ACK | 61 B | node, local/remote tunnel IDs, address/prefix, Hub data port, nonce |
-| SYNC | `48 + 30 × N` B | node, nonce, count, and N fixed-size peer records |
+| INIT | 54 B | node, requested address/prefix, Raw claim, 16 B nonce |
+| CHALLENGE | 86 B | INIT fields + 32 B cookie |
+| CONFIRM | 86 B | CHALLENGE echo |
+| ACK | 84 B | node, tunnel IDs, address, Hub port, nonce, lease token, epoch |
+| SYNC | `47 + 39 × N` B | node, nonce, count, and N peer records |
+| REFRESH | 63 B | node, lease token, counter, epoch, page offset |
+| REFRESH_ACK | `72 + 39 × N` B | reflected endpoint, epoch, flags, and peer records |
 
-Each SYNC peer record contains the node ID, local and remote tunnel IDs, inner
-IPv4 address, Raw IPv4 address, and UDP `IPv4:port`. The peer count is limited to
-128 and the control-packet buffer to 8,192 bytes. The parser strictly validates
-magic, version, exact length, count, and HMAC.
+Each peer record contains the node ID, tunnel IDs, inner address, Raw and UDP
+candidates, generation, and online/tombstone flags. REFRESH_ACK is capped at
+1,200 bytes and paginated. The parser strictly validates
+magic, type, exact length, count, and HMAC.
 
 A Spoke generates a fresh nonce for every attempt and requires CHALLENGE and ACK
 to come from the configured Hub control endpoint with matching echoed fields. A
@@ -179,18 +177,20 @@ current and previous buckets are accepted.
 
 ## 8. Hub allocation, state, and direct synchronization
 
-Hub state has magic `DTS2` and version 2. It persists the cookie secret, next
+Hub state has a magic value and format validation. It persists the cookie secret, next
 node/tunnel IDs, up to 128 node records, and every allocated Spoke-pair session.
 Each Hub-to-Spoke and Spoke-pair relationship gets distinct bidirectional tunnel
 IDs allocated from 100 and persisted.
 
-Once per second, the Hub checks node leases using `last_seen`, which is updated
-by the last successful CONFIRM. After `peer_timeout` (60 seconds by default), it
-removes the Hub kernel peer, node record, and every Spoke-pair session that
-references the node, then atomically saves state. Online Spokes receive a SYNC
-without the expired node on their next periodic registration, and `apply_sync`
-removes the local direct peer. A returning expired node receives new tunnel and
-session IDs. Stable deployments should still configure a fixed nonzero node ID.
+The Hub updates `last_seen` after valid CONFIRM and REFRESH messages. After
+`peer_timeout` it removes only the active kernel path and marks the node offline;
+address and tunnel/session allocations remain for `identity_retention` (86,400
+seconds by default). Reconnection with the same node ID reuses those sessions.
+The Hub rotates persisted lease tokens whenever it starts. An authenticated
+REFRESH carrying an old token receives a `RE_REGISTER` flag without disclosing
+the new token. The Spoke immediately performs the full registration and rebuilds
+the Hub peer and replay window at that authenticated daemon-lifecycle boundary.
+Ordinary endpoint candidate changes do not reset sequence numbers.
 
 State is saved using the current C structure's binary layout. It is suitable for
 daemon restart recovery on the same platform and should not be treated as a
@@ -213,10 +213,11 @@ determine whether Raw enters its active window.
 - A Spoke creates its interface and Hub peer after the first valid ACK. Its local
   UDP port comes from its own `data_port`; the Hub destination data port comes
   from ACK.
-- A resident Spoke registers periodically and keeps the existing interface on
-  failure. A Hub restart that preserves state normally recovers within one
-  interval. Changes to the assigned address, node, prefix, or Hub data port can
-  cause the interface to be recreated.
+- A resident Spoke sends REFRESH every second and keeps the existing interface
+  on failure. After a Hub restart, the authenticated `RE_REGISTER` reply skips
+  additional timeout retries; full registration reuses the persisted identity
+  and session. Changes to the assigned address, node, prefix, or Hub data port
+  can cause the interface to be recreated.
 - With `once=true`, the daemon exits after the first attempt: success leaves the
   interface in place, while failure returns nonzero with no retained interface.
 - SIGINT, SIGTERM, and SIGHUP all mean stop; live configuration reload is not
@@ -232,18 +233,17 @@ determine whether Raw enters its active window.
 - Effective end-to-end routing supports IPv4 only.
 - Raw IP 253 generally cannot cross NAT and may be filtered by providers or
   cloud security groups.
-- UDP selection is not currently gated by `udp_up`, and a dead endpoint does not
-  automatically switch to a general outer relay.
+- Direct UDP selection requires a recently authenticated source; otherwise
+  unicast traffic is re-encapsulated through the Hub peer.
 - Indirect Hub forwarding depends on host IPv4 forwarding and the FORWARD
   firewall policy.
-- DTRG v2 supports only the current C Hub and Spoke. Older C and Python control
-  planes are explicitly incompatible, so every control-plane node must be
-  upgraded together.
+- DTRG remains under development and supports only C Hub and Spoke binaries
+  built from the same source revision; protocol changes require coordinated deployment.
 - Hub state is a versioned local binary structure and is not portable across
   every ABI or architecture.
 - There is no explicit deregistration message. Registration lease expiry
   performs stale cleanup, and other Spokes learn it through periodic SYNC.
-- `dtunctl` has no peer-list or statistics command; reserved `STATS_GET` remains
+- `dtunctl peer-list` dumps peer snapshots; reserved `STATS_GET` remains
   unimplemented.
 - The tunnel has no congestion control, PMTU discovery, fragmentation strategy,
   or production-grade key management.

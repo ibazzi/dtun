@@ -22,8 +22,8 @@
 #define DTUN_VERSION            1
 #define DTUN_TAG_LEN            16
 #define DTUN_KEY_LEN            32
-#define DTUN_PROBE_INTERVAL     (5 * HZ)
-#define DTUN_PATH_TIMEOUT       (15 * HZ)
+#define DTUN_PROBE_INTERVAL_MS  1000U
+#define DTUN_PATH_TIMEOUT_MS    3000U
 
 enum dtun_frame_type {
 	DTUN_FRAME_DATA = 1,
@@ -35,6 +35,13 @@ enum dtun_transport {
 	DTUN_TRANSPORT_RAW = 1,
 	DTUN_TRANSPORT_UDP = 2,
 	DTUN_TRANSPORT_RELAY = 3,
+};
+
+enum dtun_selected_path {
+	DTUN_PATH_DOWN = 0,
+	DTUN_PATH_RAW = 1,
+	DTUN_PATH_UDP = 2,
+	DTUN_PATH_HUB = 3,
 };
 
 /* The tag authenticates all preceding header bytes plus the inner packet. */
@@ -68,8 +75,13 @@ struct dtun_peer {
 	u32 remote_tunnel_id;
 	u64 node_id;
 	__be32 raw_addr;
+	__be32 raw_validated_addr;
 	__be32 udp_addr;
 	__be16 udp_port;
+	__be32 direct_udp_addr;
+	__be16 direct_udp_port;
+	u64 candidate_generation;
+	bool dynamic_raw;
 	unsigned long raw_seen;
 	unsigned long udp_seen;
 	atomic64_t tx_seq;
@@ -89,6 +101,8 @@ struct dtun_dev {
 	__be16 hub_port;
 	u64 node_id;
 	struct socket *udp_sock;
+	u32 probe_interval_ms;
+	u32 path_timeout_ms;
 	spinlock_t peer_lock;
 	struct list_head peers;
 	struct delayed_work probe_work;
@@ -104,6 +118,8 @@ enum dtun_nl_cmd {
 	DTUN_CMD_ROUTE_DEL,
 	DTUN_CMD_PEER_GET,
 	DTUN_CMD_STATS_GET,
+	DTUN_CMD_PEER_LIST,
+	DTUN_CMD_REBIND,
 	__DTUN_CMD_MAX,
 };
 #define DTUN_CMD_MAX (__DTUN_CMD_MAX - 1)
@@ -123,6 +139,14 @@ enum dtun_nl_attr {
 	DTUN_A_RAW_UP,
 	DTUN_A_UDP_UP,
 	DTUN_A_REMOTE_TUNNEL_ID,
+	DTUN_A_DYNAMIC_RAW,
+	DTUN_A_CANDIDATE_GENERATION,
+	DTUN_A_RENDEZVOUS_UDP_ADDR,
+	DTUN_A_RENDEZVOUS_UDP_PORT,
+	DTUN_A_DIRECT_UDP_ADDR,
+	DTUN_A_DIRECT_UDP_PORT,
+	DTUN_A_RAW_VALIDATED_ADDR,
+	DTUN_A_SELECTED_PATH,
 	__DTUN_A_MAX,
 };
 #define DTUN_A_MAX (__DTUN_A_MAX - 1)
@@ -134,6 +158,8 @@ enum dtun_link_attr {
 	IFLA_DTUN_NODE_ID,
 	IFLA_DTUN_HUB,
 	IFLA_DTUN_HUB_PORT,
+	IFLA_DTUN_PROBE_INTERVAL_MS,
+	IFLA_DTUN_PATH_TIMEOUT_MS,
 	__IFLA_DTUN_MAX,
 };
 #define IFLA_DTUN_MAX (__IFLA_DTUN_MAX - 1)

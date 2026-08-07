@@ -101,7 +101,7 @@ spoke_conf() { # ns outer inner node [once] [interval]
 [global]
 mode = spoke
 interface = dtun0
-local_outer_ip = $outer
+local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = $node
 address = $inner/24
@@ -195,7 +195,7 @@ tx_drop() { # ns
 
 peer_get() { # ns tunnel_id
 	ns=$1; tid=$2
-	ip netns exec "$ns" "$CTL" peer-get --ifindex "$(ifindex "$ns")" --tunnel-id "$tid"
+	ip netns exec "$ns" "$CTL" peer-get --format json --ifindex "$(ifindex "$ns")" --tunnel-id "$tid"
 }
 
 ipt_counters() { # ns  (echoes "raw udp")

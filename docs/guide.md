@@ -11,7 +11,7 @@
 
 | 流量 | 默认端口/协议 | 方向 | 用途 |
 | --- | --- | --- | --- |
-| 注册控制面 | UDP 49001 | Spoke → Hub | DTRG v2 注册和 SYNC |
+| 注册控制面 | UDP 49001 | Spoke → Hub | DTRG 注册、REFRESH 和候选同步 |
 | 数据面 | UDP 49000 | 双向 | NAT 兼容的数据承载与探测 |
 | 数据面 | IPv4 协议 253 | 双向 | 优先使用的 Raw IP 承载 |
 
@@ -72,6 +72,9 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `interface` | `dtun0` | daemon 创建和管理的接口名 |
 | `local_outer_ip` | `0.0.0.0` | 本机外层 IPv4；为 0 时按每条外层路由自动选择源地址 |
 | `data_port` | `49000` | 本地数据面 UDP 端口 |
+| `probe_interval_ms` | `1000` | Raw/UDP 路径探测间隔 |
+| `path_timeout_ms` | `3000` | 活跃路径失效时间；不得小于两倍探测间隔 |
+| `fast_recovery` | `true` | 启用出口变化快速恢复；Spoke 必须绑定 `0.0.0.0` |
 | `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
 | `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
 | `psk` | 无 | 32 字节 PSK 的 64 位十六进制表示；省略仅供不安全测试 |
@@ -86,6 +89,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `state_file` | `/var/lib/dtun/hub.state` | 带版本的二进制持久化状态 |
 | `cookie_seconds` | `30` | cookie 时间桶秒数；非正数回退为 30 |
 | `peer_timeout` | `60` | 最后一次成功注册后保留 Spoke 的秒数；非正数回退为 60 |
+| `identity_retention` | `86400` | 离线节点地址及 tunnel/session ID 保留秒数 |
 
 ### `[spoke]`
 
@@ -95,6 +99,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `hub_port` | `49001` | Hub 控制端口，不是数据端口 |
 | `local_port` | `0` | 注册控制 socket 的本地源端口；0 表示临时端口 |
 | `interval` | `20` | 每次注册尝试后的重试/刷新间隔；非正数按 1 秒处理 |
+| `refresh_interval_ms` | `1000` | 已注册会话的 DTRG 轻量刷新间隔 |
 | `timeout` | `5` | 每个控制响应的接收超时；非正数回退为 5 秒 |
 | `once` | `false` | 首次尝试后退出；成功时保留接口，失败时返回非零 |
 
@@ -148,7 +153,7 @@ sudo ./bin/dtund -c /etc/dtun/hub.conf
 [global]
 mode = spoke
 interface = dtun0
-local_outer_ip = 192.0.2.2
+local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = 2
 address = 10.99.0.2/24
@@ -212,12 +217,12 @@ Hub 每秒检查一次注册租约。Spoke 超过 `peer_timeout` 未完成有效
 内核发送路径的实际顺序是：
 
 ```text
-15 秒内收到过有效帧的 Raw 候选 → 15 秒内收到过有效帧的直连 UDP 端点 (打洞成功) → 接口 Hub 中转端点 (打洞失败/未建立直连时回退)
+3 秒内完成往返验证的 Raw 候选 → 3 秒内收到过认证帧的直连 UDP 端点 → 使用 Hub peer 重新封装并转发
 ```
 
-`udp_up` 是观测状态，当前不作为 UDP 发送门槛。接口的 `hub`/`hub_port` 只是当 peer
-没有 UDP 端点时替换发送目的地址；它不会重写目标 node/tunnel ID，因此不是通用的
-spoke 间外层 relay。spoke 间可靠回退应使用上述 Hub 内层 IPv4 转发路径。
+Hub 同步的 rendezvous 地址只用于打洞；只有直接收到认证包后才设置 `udp_up`。
+直连不可用时内核改用 Hub peer 重新封装，因此 tunnel ID/HMAC 与 Hub 会话匹配，
+再由 Hub 按内层 IPv4 路由转发。
 
 IPv4 组播包会由发送节点复制到接口上的所有 peer，不需要为 `224.0.0.0/4` 配置 peer
 前缀。内核当前不跟踪 IGMP 成员关系，所以所有已配置 peer 都会收到副本；节点较多或
@@ -243,10 +248,14 @@ dmesg | grep -i dtun
 ```sh
 IFINDEX=$(cat /sys/class/net/dtun0/ifindex)
 sudo ./bin/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
+sudo ./bin/dtunctl peer-list --ifindex "$IFINDEX"
+sudo ./bin/dtunctl peer-list --ifindex "$IFINDEX" --format json
 ```
 
-`dtunctl` 当前没有 peer-list，`peer-get` 必须提供本地 tunnel ID。`raw_up` 表示最近
-15 秒内收到过该 peer 的有效 Raw 帧；`udp_up` 表示最近 15 秒内收到过有效 UDP 帧。
+`peer-get` 必须提供本地 tunnel ID；`peer-list` 使用 Netlink multipart dump 返回一致
+快照。peer 命令默认输出人类可读信息，自动化应显式使用 `--format json`。
+`peer-add`、`peer-set` 和 `peer-del` 在 JSON 模式下也返回带 `success` 和 errno 信息的
+结果对象；JSON 地址缺失时使用 `null`。
 
 常见问题：
 

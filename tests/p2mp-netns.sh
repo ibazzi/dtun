@@ -15,6 +15,11 @@ B=${PREFIX}b
 BR=${PREFIX}br
 OUT=/tmp/dtun-p2mp
 
+fail() {
+	echo "dtun p2mp test: $*" >&2
+	exit 1
+}
+
 stop_pid() {
 	file=$1
 	if [ -f "$file" ]; then
@@ -87,7 +92,7 @@ spoke_config() {
 [global]
 mode = spoke
 interface = dtun0
-local_outer_ip = $outer
+local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = $node
 address = $inner/24
@@ -125,8 +130,8 @@ for i in $(seq 1 25); do
 	ifa=$(ip -n "$A" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
 	ifb=$(ip -n "$B" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
 	if [ -n "$ifa" ] && [ -n "$ifb" ] &&
-	   ip netns exec "$A" "$CTL" peer-get --ifindex "$ifa" --tunnel-id 104 2>/dev/null | grep -q '"node_id": 3' &&
-	   ip netns exec "$B" "$CTL" peer-get --ifindex "$ifb" --tunnel-id 105 2>/dev/null | grep -q '"node_id": 2'; then
+	   ip netns exec "$A" "$CTL" peer-get --format json --ifindex "$ifa" --tunnel-id 104 2>/dev/null | grep -q '"node_id":3' &&
+	   ip netns exec "$B" "$CTL" peer-get --format json --ifindex "$ifb" --tunnel-id 105 2>/dev/null | grep -q '"node_id":2'; then
 		direct=1
 		break
 	fi
@@ -166,20 +171,24 @@ rm -f "$OUT/mcast-b.pid"
 grep -qx 'dtun-multicast' "$OUT/mcast-hub.out" || fail "Hub multicast payload mismatch"
 grep -qx 'dtun-multicast' "$OUT/mcast-b.out" || fail "Spoke multicast payload mismatch"
 
-# A stopped Spoke must expire from the Hub kernel/state.  The surviving Spoke
-# learns the reduced membership through its next periodic registration SYNC.
+# A stopped Spoke is removed from the Hub's active kernel paths while its
+# stable session remains on the surviving Spoke for identity retention.
 stop_pid "$OUT/b.pid"
 expired=0
 ifh=$(ip -n "$HUB" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
+hub_b_tunnel=$(ip netns exec "$HUB" "$CTL" peer-list --format json \
+	--ifindex "$ifh" | python3 -c \
+	'import json,sys; print(next(p["tunnel_id"] for p in json.load(sys.stdin) if p["node_id"] == 3))')
 for i in $(seq 1 15); do
 	if ! ip netns exec "$HUB" "$CTL" peer-get --ifindex "$ifh" \
-		--tunnel-id 103 >/dev/null 2>&1 &&
-	   ! ip netns exec "$A" "$CTL" peer-get --ifindex "$ifa" --tunnel-id 104 >/dev/null 2>&1; then
+			--tunnel-id "$hub_b_tunnel" >/dev/null 2>&1 &&
+	   ip netns exec "$A" "$CTL" peer-get --format json --ifindex "$ifa" \
+		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"hub"'; then
 		expired=1
 		break
 	fi
 	sleep 1
 done
-[ "$expired" = 1 ] || fail "expired Spoke was not removed from Hub and surviving Spoke"
-grep -q 'Expired Spoke NodeID=3' "$OUT/hub.log" || fail "Hub did not log Spoke expiry"
+[ "$expired" = 1 ] || fail "offline Spoke was not removed from Hub active paths"
+grep -q 'Marked Spoke NodeID=3.*offline' "$OUT/hub.log" || fail "Hub did not log Spoke offline"
 echo "dtun C point-to-multipoint netns regression passed"

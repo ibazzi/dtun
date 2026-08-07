@@ -10,9 +10,10 @@
 
 ```sh
 ip link add dtun0 type dtun local 192.0.2.10 udp_port 49000 node_id 1 \
-  hub 192.0.2.1 hub_port 49000
+  hub 192.0.2.1 hub_port 49000 probe_interval_ms 1000 path_timeout_ms 3000
 ```
 
 `local`、`udp_port` 和 `node_id` 是必填项；`hub`、`hub_port` 可选，未提供
-`hub_port` 时内核使用本地 `udp_port`。模块没有复用现有隧道类型的 link 属性，
+`hub_port` 时内核使用本地 `udp_port`；探测和超时参数省略时使用 1000/3000 ms。
+模块没有复用现有隧道类型的 link 属性，
 因此未经修改的 iproute2 无法编码 dtun 的链路配置。

@@ -13,7 +13,7 @@ A basic deployment has one Hub and one or more Spokes:
 
 | Traffic | Default port/protocol | Direction | Purpose |
 | --- | --- | --- | --- |
-| Registration control | UDP 49001 | Spoke → Hub | DTRG v2 registration and SYNC |
+| Registration control | UDP 49001 | Spoke → Hub | DTRG registration, REFRESH, and candidate sync |
 | Data plane | UDP 49000 | Bidirectional | NAT-compatible data and probes |
 | Data plane | IPv4 protocol 253 | Bidirectional | Preferred Raw IP transport |
 
@@ -84,6 +84,9 @@ name; the section assignments below are conventions for supported configs.
 | `interface` | `dtun0` | Interface created and managed by the daemon |
 | `local_outer_ip` | `0.0.0.0` | Local outer IPv4; zero selects the source from each outer route |
 | `data_port` | `49000` | Local data-plane UDP port |
+| `probe_interval_ms` | `1000` | Raw/UDP path probe interval |
+| `path_timeout_ms` | `3000` | Path liveness timeout; at least twice the probe interval |
+| `fast_recovery` | `true` | Enable endpoint-change recovery; Spokes must use a wildcard outer address |
 | `node_id` | `0` | A Hub must use 1 (0 falls back to 1); on a Spoke, 0 requests temporary allocation and 1 is reserved |
 | `address` | `0.0.0.0/24` | Inner IPv4/CIDR; a zero Spoke address requests pool allocation |
 | `psk` | none | 64-hex-digit representation of a 32-byte PSK; omission is insecure test mode |
@@ -98,6 +101,7 @@ name; the section assignments below are conventions for supported configs.
 | `state_file` | `/var/lib/dtun/hub.state` | Versioned binary persistent state |
 | `cookie_seconds` | `30` | Cookie time-bucket duration; nonpositive values fall back to 30 |
 | `peer_timeout` | `60` | Seconds to retain a Spoke after its last successful registration; nonpositive values fall back to 60 |
+| `identity_retention` | `86400` | Seconds to retain offline address and tunnel/session allocations |
 
 ### `[spoke]`
 
@@ -107,6 +111,7 @@ name; the section assignments below are conventions for supported configs.
 | `hub_port` | `49001` | Hub control port, not the data port |
 | `local_port` | `0` | Local registration-control source port; 0 selects an ephemeral port |
 | `interval` | `20` | Delay after each registration attempt; nonpositive values act as 1 second |
+| `refresh_interval_ms` | `1000` | DTRG lightweight refresh interval after registration |
 | `timeout` | `5` | Receive timeout for each control response; nonpositive values fall back to 5 |
 | `once` | `false` | Exit after the first attempt; keep the link on success, return nonzero on failure |
 
@@ -167,7 +172,7 @@ Static-address configuration:
 [global]
 mode = spoke
 interface = dtun0
-local_outer_ip = 192.0.2.2
+local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = 2
 address = 10.99.0.2/24
@@ -245,15 +250,13 @@ network disruption.
 The kernel's actual transmit order is:
 
 ```text
-Raw candidate seen valid within 15 seconds → direct UDP endpoint validated within 15 seconds (hole punch OK) → interface Hub endpoint (fallback on punch failure)
+Raw candidate validated within 3 seconds → directly observed authenticated UDP endpoint within 3 seconds → re-encapsulation through the Hub peer
 ```
 
-`udp_up` is observational and is not currently a gate for UDP transmission. The
-link's `hub` and `hub_port` only replace the destination endpoint when a peer has
-no UDP endpoint; they do not rewrite the destination node or tunnel ID. They are
-therefore not a general outer relay between Spokes. Reliable indirect
-Spoke-to-Spoke traffic should use the Hub's inner IPv4 forwarding path described
-above.
+Hub-supplied rendezvous candidates are probe-only; `udp_up` is set only after a
+peer directly observes an authenticated source. When direct paths fail, the
+packet is re-encapsulated with the Hub peer's tunnel ID and HMAC, then forwarded
+according to the inner IPv4 route at the Hub.
 
 IPv4 multicast is replicated by the sending node to every peer on the link; no
 peer prefix for `224.0.0.0/4` is required. The kernel does not currently track
@@ -276,16 +279,18 @@ ss -lunp | grep -E '49000|49001'
 dmesg | grep -i dtun
 ```
 
-If the local tunnel ID is known, inspect its candidate and liveness state:
+Inspect one peer or dump the interface peer snapshot:
 
 ```sh
 IFINDEX=$(cat /sys/class/net/dtun0/ifindex)
-sudo ./bin/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
+sudo ./build/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
+sudo ./build/dtunctl peer-list --ifindex "$IFINDEX"
+sudo ./build/dtunctl peer-list --ifindex "$IFINDEX" --format json
 ```
 
-`dtunctl` currently has no peer-list command, so `peer-get` requires a local
-tunnel ID. `raw_up` means a valid Raw frame was received from that peer within
-15 seconds; `udp_up` means a valid UDP frame was received within 15 seconds.
+Peer commands default to human-readable output; automation should explicitly
+select `--format json`. `raw_up` and `udp_up` use the configured path timeout,
+which defaults to three seconds.
 
 Common issues:
 
