@@ -608,6 +608,16 @@ static int address_in_use(struct in_addr address) {
   return 0;
 }
 
+static hub_node_record_t *node_by_address(struct in_addr address) {
+  uint32_t i;
+  if (!address.s_addr)
+    return NULL;
+  for (i = 0; i < g_hub_state.node_count; i++)
+    if (g_hub_state.nodes[i].address.s_addr == address.s_addr)
+      return &g_hub_state.nodes[i];
+  return NULL;
+}
+
 static hub_node_record_t *node_by_id(uint64_t node_id) {
   uint32_t i;
   for (i = 0; i < g_hub_state.node_count; i++)
@@ -642,7 +652,10 @@ hub_allocate_node(const dtun_config_t *config, struct in_addr hub_address,
     snprintf(error, error_len, "node ID 1 is reserved for the Hub");
     return NULL;
   }
-  existing = requested_node ? node_by_id(requested_node) : NULL;
+  existing = requested_node ? node_by_id(requested_node)
+                            : (requested_address.s_addr
+                                   ? node_by_address(requested_address)
+                                   : NULL);
   if (existing) {
     if ((requested_address.s_addr &&
          requested_address.s_addr != existing->address.s_addr) ||
@@ -1069,6 +1082,14 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     dtun_nl_peer_info_t peer;
     if (!record->online)
       continue;
+    if (!record->node_id || !record->hub_tunnel_id || !record->tunnel_id) {
+      record->online = 0;
+      record->offline_since = time(NULL);
+      continue;
+    }
+    (void)dtun_nl_route_del(ifindex, record->hub_tunnel_id, record->address,
+                            32);
+    (void)dtun_nl_peer_del(ifindex, record->hub_tunnel_id);
     memset(&peer, 0, sizeof(peer));
     peer.ifindex = ifindex;
     peer.tunnel_id = record->hub_tunnel_id;
@@ -1076,7 +1097,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     peer.node_id = record->node_id;
     peer.raw_addr = record->raw;
     peer.udp_addr = record->udp_addr;
-    peer.udp_port = record->udp_port;
+    peer.udp_port = record->udp_port ? record->udp_port : data_port;
     peer.dynamic_raw = 1;
     peer.has_dynamic_raw = 1;
     peer.candidate_generation = record->generation;
@@ -1086,9 +1107,11 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
       memcpy(peer.key, psk, sizeof(peer.key));
     if (program_peer(&peer) < 0 || program_route(ifindex, record->hub_tunnel_id,
                                                  record->address, 32) < 0) {
-      fprintf(stderr, "Failed to restore persisted Hub peer %llu\n",
-              (unsigned long long)record->node_id);
-      goto fail_link;
+      dtun_log_warn(
+          "[dtund Hub] Failed to restore persisted peer %llu, marking offline",
+          (unsigned long long)record->node_id);
+      record->online = 0;
+      record->offline_since = time(NULL);
     }
   }
   sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -1104,8 +1127,23 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     close(sock);
     goto fail_link;
   }
-  dtun_log_info("[dtund] Hub listening on %s:%d (DTRG)", config->bind_address,
-                config->bind_port);
+  if (config->ha_enabled) {
+    dtun_ha_state_t ha_st;
+    if (dtun_ha_state_load(config->ha_state_file, &ha_st) == 0) {
+      dtun_log_info(
+          "[dtund HA] Local Hub '%s' (role=%s) starting Active Leader "
+          "service on %s:%d at term %llu",
+          ha_st.local_hub_id, config->ha_role ? config->ha_role : "unknown",
+          config->bind_address, config->bind_port,
+          (unsigned long long)ha_st.term);
+    } else {
+      dtun_log_info("[dtund] Hub listening on %s:%d (DTRG)",
+                    config->bind_address, config->bind_port);
+    }
+  } else {
+    dtun_log_info("[dtund] Hub listening on %s:%d (DTRG)", config->bind_address,
+                  config->bind_port);
+  }
   fflush(stdout);
   while (g_running) {
     if (config->ha_enabled) {
@@ -1119,7 +1157,10 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
           state.commit_index++;
           (void)dtun_ha_state_save(config->ha_state_file, &state);
         }
-        dtun_log_info("[dtund HA] Local Hub demoted by term %llu leader %s",
+        dtun_log_info("[dtund HA] Local Hub '%s' (role=%s) demoted to Standby "
+                      "by term %llu leader '%s'",
+                      state.local_hub_id,
+                      config->ha_role ? config->ha_role : "unknown",
                       (unsigned long long)state.term, state.leader_id);
         fflush(stdout);
         demoted = 1;
@@ -1166,8 +1207,12 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     } else if (message.kind == DTRG_CONFIRM &&
                validate_cookie(config, &source, &message)) {
       char allocation_error[160];
-      int allocation_is_new =
-          !message.node_id || node_by_id(message.node_id) == NULL;
+      hub_node_record_t *existing_record =
+          message.node_id
+              ? node_by_id(message.node_id)
+              : (message.address.s_addr ? node_by_address(message.address)
+                                        : NULL);
+      int allocation_is_new = (existing_record == NULL);
       hub_node_record_t *record = hub_allocate_node(
           config, inner_address, message.node_id, message.address,
           message.prefix_len, allocation_error, sizeof(allocation_error));
@@ -1239,9 +1284,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
           dtrg_msg_free(&message);
           continue;
         }
-        if (config->ha_enabled &&
-            (!(config->ha_role && !strcmp(config->ha_role, "backup") &&
-               !allocation_is_new)) &&
+        if (config->ha_enabled && allocation_is_new &&
             dtund_ha_wait_replicated(g_ha_service, config->state_file,
                                      config->timeout) < 0) {
           fprintf(stderr, "[dtund HA] Registration allocation retained but "
@@ -1270,9 +1313,13 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         {
           char text[INET_ADDRSTRLEN];
           inet_ntop(AF_INET, &record->address, text, sizeof(text));
+          char outer_text[INET_ADDRSTRLEN];
+          inet_ntop(AF_INET, &peer.udp_addr.s_addr, outer_text,
+                    sizeof(outer_text));
           printf("[dtund Hub] Registered/Refreshed Spoke NodeID=%llu "
-                 "InnerIP=%s DirectPeers=%u\n",
-                 (unsigned long long)record->node_id, text, sync_count);
+                 "InnerIP=%s OuterEndpoint=%s:%u DirectPeers=%u\n",
+                 (unsigned long long)record->node_id, text, outer_text,
+                 ntohs(peer.udp_port), sync_count);
           fflush(stdout);
         }
       }
@@ -1344,12 +1391,10 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
   }
   close(sock);
   dtun_link_delete_by_name(config->interface);
-  dtun_module_unload_if_needed();
   return demoted ? 2 : 0;
 
 fail_link:
   dtun_link_delete_by_name(config->interface);
-  dtun_module_unload_if_needed();
   return 1;
 }
 
@@ -1918,7 +1963,6 @@ out:
     close(sock);
   if (ifindex && !(config->once && registered_once)) {
     dtun_link_delete_by_name(config->interface);
-    dtun_module_unload_if_needed();
   }
   return result;
 }
@@ -2011,7 +2055,11 @@ int main(int argc, char **argv) {
         time_t last_seen = time(NULL);
         time_t stable_since = 0;
         int promoted = 0;
-        dtun_log_info("[dtund HA] Standby Hub waiting for active leader");
+        dtun_log_info(
+            "[dtund HA] Standby Hub '%s' (role=%s) waiting for active "
+            "leader '%s' (term %llu)",
+            ha_state.local_hub_id, config.ha_role ? config.ha_role : "unknown",
+            ha_state.leader_id, (unsigned long long)ha_state.term);
         while (g_running && !promoted) {
           int step;
           if (config.ha_role && !strcmp(config.ha_role, "primary")) {

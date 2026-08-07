@@ -22,7 +22,6 @@ static uint32_t genl_seq = 0;
 /* Modules are system-wide while dtund instances may live in independent
  * network namespaces.  Teardown must not unload a module that this process
  * merely found already present. */
-static int dtun_module_loaded_here = 0;
 
 static int pack_dtun_attr(char *buf, size_t maxlen, int type, const void *val,
                           size_t len);
@@ -747,7 +746,6 @@ int dtun_module_ensure_loaded(void) {
   }
 
   if (access("/sys/module/dtun", F_OK) == 0) {
-    dtun_module_loaded_here = 1;
     dtun_log_info("[dtund] Kernel module 'dtun' loaded successfully.");
     return 0;
   }
@@ -757,17 +755,4 @@ int dtun_module_ensure_loaded(void) {
   return -1;
 }
 
-void dtun_module_unload_if_needed(void) {
-  if (!dtun_module_loaded_here || access("/sys/module/dtun", F_OK) != 0) {
-    return;
-  }
-
-  dtun_log_info("[dtund] Unloading kernel module 'dtun'...");
-
-  int ret = system("modprobe -r dtun 2>/dev/null");
-  if (ret != 0) {
-    ret = system("rmmod dtun 2>/dev/null");
-    (void)ret;
-  }
-  dtun_module_loaded_here = 0;
-}
+void dtun_module_unload_if_needed(void) { /* Never unload kernel module */ }

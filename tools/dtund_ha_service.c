@@ -331,9 +331,11 @@ int dtund_ha_standby_step(const dtun_config_t *c, time_t *last_seen) {
              state.local_hub_id);
     if (dtun_ha_state_save(c->ha_state_file, &state) < 0)
       return -1;
-    dtun_log_info("[dtund HA] Primary unavailable for %ds; direct-pair "
-                  "takeover at term %llu",
-                  c->failover_timeout, (unsigned long long)state.term);
+    dtun_log_info("[dtund HA] Direct-pair failover: leader '%s' "
+                  "unavailable for %ds; local hub '%s' taking over as leader "
+                  "at term %llu",
+                  old_leader_id, c->failover_timeout, state.local_hub_id,
+                  (unsigned long long)state.term);
     return 1;
   }
   if (state.member_count >= 3 && local->role == DTUN_HA_VOTER &&
@@ -381,8 +383,10 @@ int dtund_ha_standby_step(const dtun_config_t *c, time_t *last_seen) {
           (void)dtun_ha_announce_leader(m->address, m->ha_port, &state, m,
                                         c->ha_identity_key);
       }
-      dtun_log_info("[dtund HA] Won quorum election term %llu with %u/%u votes",
-                    (unsigned long long)term, votes, voters);
+      dtun_log_info("[dtund HA] Won quorum election at term %llu with %u/%u "
+                    "votes; hub '%s' taking over as leader",
+                    (unsigned long long)term, votes, voters,
+                    state.local_hub_id);
       return 1;
     }
   }
@@ -558,8 +562,9 @@ int dtund_ha_recover_primary_step(const dtun_config_t *c,
                                       c->ha_identity_key);
     }
     dtun_log_info(
-        "[dtund HA] Recovery stable; preferred primary resumes at term %llu",
-        (unsigned long long)term);
+        "[dtund HA] Recovery stable after %ds; preferred primary '%s' "
+        "resumes active leader at term %llu",
+        required, state.local_hub_id, (unsigned long long)term);
     return 1;
   }
   *stable_since = 0;

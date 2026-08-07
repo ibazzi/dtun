@@ -105,6 +105,46 @@ out:
   return result;
 }
 
+static int ha_existing_allocation_test(void) {
+  dtun_config_t config;
+  struct in_addr hub, requested;
+  char error[160];
+
+  dtun_config_init(&config);
+  config.ha_enabled = 1;
+  config.ha_role = strdup("primary");
+  inet_pton(AF_INET, "10.99.0.1", &hub);
+  inet_pton(AF_INET, "10.99.0.2", &requested);
+
+  hub_state_init();
+  hub_node_record_t *record =
+      hub_allocate_node(&config, hub, 2, requested, 24, error, sizeof(error));
+  if (!record || record->node_id != 2) {
+    dtun_config_free(&config);
+    return -1;
+  }
+
+  /* Test re-registration when requested_node is 0 but requested_address matches
+   * existing allocation */
+  hub_node_record_t *re_record =
+      hub_allocate_node(&config, hub, 0, requested, 24, error, sizeof(error));
+  if (!re_record || re_record->node_id != 2) {
+    dtun_config_free(&config);
+    return -1;
+  }
+
+  hub_node_record_t *existing_record = node_by_address(requested);
+  int allocation_is_new = (existing_record == NULL);
+  int wait_required = config.ha_enabled && allocation_is_new;
+  if (wait_required != 0) {
+    dtun_config_free(&config);
+    return -1;
+  }
+
+  dtun_config_free(&config);
+  return 0;
+}
+
 static int standby_step_failover_test(void) {
   dtun_config_t config;
   dtun_ha_state_t state, loaded;
@@ -190,6 +230,7 @@ int main(void) {
   FILE *file = NULL;
   int fd = -1;
   int result = 0;
+  STATE_CHECK(ha_existing_allocation_test() == 0);
 
   dtun_config_init(&config);
   STATE_CHECK(config_syslog_test() == 0);
