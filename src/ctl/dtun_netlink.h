@@ -66,6 +66,8 @@ int dtun_nl_peer_get(uint32_t ifindex, uint32_t tunnel_id, dtun_nl_peer_status_t
 int dtun_nl_peer_list(uint32_t ifindex, dtun_nl_peer_status_t **statuses,
                       size_t *count);
 int dtun_nl_rebind(uint32_t ifindex);
+int dtun_nl_hub_set(uint32_t ifindex, struct in_addr hub_addr,
+                    uint16_t hub_port);
 
 /* Kernel module management functions */
 int dtun_module_ensure_loaded(void);

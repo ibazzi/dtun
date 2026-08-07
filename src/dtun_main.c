@@ -49,6 +49,14 @@ static unsigned long dtun_path_timeout(const struct dtun_dev *d)
 	return msecs_to_jiffies(d->path_timeout_ms);
 }
 
+static void dtun_hub_endpoint(struct dtun_dev *d, __be32 *addr, __be16 *port)
+{
+	spin_lock_bh(&d->hub_lock);
+	*addr = d->hub_addr;
+	*port = d->hub_port;
+	spin_unlock_bh(&d->hub_lock);
+}
+
 /*
  * crypto_memneq() is not exported by every supported 6.6+ kernel.  Keep the
  * authentication check local and fixed-time for the protocol's fixed-size tag.
@@ -97,6 +105,8 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
 	u64 src_node, dst_node;
 	bool endpoint_changed = false;
 	bool reply_probe = false;
+	__be32 hub_addr;
+	__be16 hub_port;
 	int err;
 
 	if (!pskb_may_pull(skb, sizeof(*hdr)))
@@ -144,8 +154,8 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
 		peer->raw_seen = jiffies;
 	}
 	else {
-		if (peer->node_id == 1 || src != d->hub_addr ||
-		    port != d->hub_port) {
+		dtun_hub_endpoint(d, &hub_addr, &hub_port);
+		if (peer->node_id == 1 || src != hub_addr || port != hub_port) {
 			/* Learn the authenticated source port too: a NAT'd spoke's
 			 * public mapping is only observable from inbound frames.  The
 			 * configured Hub relay endpoint is kept stable. */
@@ -803,9 +813,14 @@ static void dtun_probe_work(struct work_struct *work)
 		if (udp_addr && udp_port)
 			dtun_send_path(d, peer, DTUN_FRAME_PROBE, NULL, 0,
 				       DTUN_TRANSPORT_UDP, udp_addr, udp_port);
-		else if (d->hub_addr)
-			dtun_send_path(d, peer, DTUN_FRAME_KEEPALIVE, NULL, 0,
-				       DTUN_TRANSPORT_RELAY, d->hub_addr, d->hub_port);
+		else {
+			__be32 hub_addr;
+			__be16 hub_port;
+			dtun_hub_endpoint(d, &hub_addr, &hub_port);
+			if (hub_addr)
+				dtun_send_path(d, peer, DTUN_FRAME_KEEPALIVE, NULL, 0,
+					       DTUN_TRANSPORT_RELAY, hub_addr, hub_port);
+		}
 		dtun_peer_put(peer);
 	}
 	kfree(peers);
@@ -840,6 +855,7 @@ static int dtun_newlink(struct net *net, struct net_device *dev,
 	d->local_addr = nla_get_be32(data[IFLA_DTUN_LOCAL]);
 	d->udp_port = nla_get_be16(data[IFLA_DTUN_UDP_PORT]);
 	d->node_id = nla_get_u64(data[IFLA_DTUN_NODE_ID]);
+	spin_lock_init(&d->hub_lock);
 	d->probe_interval_ms = data[IFLA_DTUN_PROBE_INTERVAL_MS] ?
 		nla_get_u32(data[IFLA_DTUN_PROBE_INTERVAL_MS]) :
 		DTUN_PROBE_INTERVAL_MS;

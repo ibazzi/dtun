@@ -13,6 +13,7 @@
 #define DTRG_SYNC 5
 #define DTRG_REFRESH 6
 #define DTRG_REFRESH_ACK 7
+#define DTRG_HUB_LIST 8
 
 #define DTRG_REFRESH_SNAPSHOT 0x01
 #define DTRG_REFRESH_MORE 0x02
@@ -27,6 +28,22 @@
 #define DTRG_LEASE_TOKEN_LEN 16
 #define DTRG_MAX_SYNC_PEERS 128
 #define DTRG_MAX_PACKET 8192
+#define DTRG_MAX_HUBS 16
+#define DTRG_HUB_ID_LEN 64
+
+#define DTRG_HA_MODE_DIRECT_PAIR 1
+#define DTRG_HA_MODE_QUORUM 2
+#define DTRG_HUB_ACTIVE 0x01
+
+typedef struct {
+    char hub_id[DTRG_HUB_ID_LEN];
+    struct in_addr address;
+    uint16_t control_port;
+    uint16_t data_port;
+    uint16_t weight;
+    uint8_t public_key[32];
+    uint8_t flags;
+} dtrg_hub_t;
 
 typedef struct {
     uint64_t node_id;
@@ -60,6 +77,12 @@ typedef struct {
     uint16_t observed_port;
     dtrg_sync_peer_t *peers; /* Allocated SYNC peer array */
     uint16_t peer_count;
+    uint8_t cluster_id[16];
+    uint64_t term;
+    uint8_t ha_mode;
+    uint16_t failover_timeout;
+    dtrg_hub_t *hubs;
+    uint8_t hub_count;
 } dtrg_msg_t;
 
 /* Compute HMAC-SHA256 truncated to 16 bytes */
@@ -97,6 +120,12 @@ ssize_t dtrg_pack_refresh_ack(const uint8_t *key, uint64_t node_id,
                               const dtrg_sync_peer_t *peers,
                               uint16_t peer_count,
                               uint8_t *out, size_t max_len);
+
+ssize_t dtrg_pack_hub_list(const uint8_t *key, uint64_t node_id,
+                           const uint8_t cluster_id[16], uint64_t term,
+                           uint8_t ha_mode, uint16_t failover_timeout,
+                           const dtrg_hub_t *hubs, uint8_t hub_count,
+                           uint8_t *out, size_t max_len);
 
 /* Parse and authenticate an incoming packet. Returns 0 on success. */
 int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len, dtrg_msg_t *msg);

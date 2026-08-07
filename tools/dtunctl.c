@@ -1,5 +1,6 @@
 #include "../../src/ctl/dtun_netlink.h"
 #include "../../src/ctl/dtun_uapi.h"
+#include "dtunctl_ha.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -225,8 +226,10 @@ int main(int argc, char **argv)
     int format_seen = 0, generation_seen = 0;
     int i, result;
 
+    if (argc >= 2 && !strcmp(argv[1], "ha"))
+        return dtunctl_ha_main(argc - 1, argv + 1);
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <peer-add|peer-set|peer-del|peer-get|peer-list|rebind|route-add|route-del> [options]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <peer-add|peer-set|peer-del|peer-get|peer-list|rebind|hub-set|route-add|route-del> [options]\n", argv[0]);
         return 2;
     }
     action = argv[1];
@@ -248,17 +251,20 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--generation") && i + 1 < argc) { generation = strtoull(argv[++i], NULL, 10); generation_seen = 1; }
         else if (!strcmp(argv[i], "--dynamic-raw")) { dynamic_raw = 1; dynamic_raw_seen = 1; }
         else if (!strcmp(argv[i], "--raw") && i + 1 < argc && inet_pton(AF_INET, argv[++i], &raw_addr) == 1) {}
-        else if (!strcmp(argv[i], "--udp") && i + 1 < argc) parse_udp(argv[++i], &udp_addr, &udp_port);
+        else if ((!strcmp(argv[i], "--udp") || !strcmp(argv[i], "--hub")) &&
+                 i + 1 < argc) parse_udp(argv[++i], &udp_addr, &udp_port);
         else if (!strcmp(argv[i], "--key") && i + 1 < argc) { parse_hex_key(argv[++i], key); has_key = 1; }
         else if (!strcmp(argv[i], "--prefix") && i + 1 < argc) parse_prefix(argv[++i], &prefix, &prefix_len);
         else { fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]); return 2; }
     }
 
-    if ((!strncmp(action, "route-", 6) || !strcmp(action, "rebind")) && format_seen) {
+    if ((!strncmp(action, "route-", 6) || !strcmp(action, "rebind") ||
+         !strcmp(action, "hub-set")) && format_seen) {
         fprintf(stderr, "--format is supported only by peer commands\n");
         return 2;
     }
     if (!ifindex || (strcmp(action, "peer-list") && strcmp(action, "rebind") &&
+                     strcmp(action, "hub-set") &&
                      !tunnel_id)) {
         fprintf(stderr, "--ifindex and, for this command, --tunnel-id are required\n");
         return 2;
@@ -312,6 +318,16 @@ int main(int argc, char **argv)
         result = dtun_nl_rebind(ifindex);
         if (!result) printf("rebind triggered: ifindex=%u\n", ifindex);
         else fprintf(stderr, "rebind failed: %s\n", strerror(-result));
+        return result ? 1 : 0;
+    }
+    if (!strcmp(action, "hub-set")) {
+        if (!udp_addr.s_addr || !udp_port) {
+            fprintf(stderr, "hub-set requires --hub IPv4:PORT\n");
+            return 2;
+        }
+        result = dtun_nl_hub_set(ifindex, udp_addr, udp_port);
+        if (!result) printf("hub endpoint updated: ifindex=%u\n", ifindex);
+        else fprintf(stderr, "hub-set failed: %s\n", strerror(-result));
         return result ? 1 : 0;
     }
     if (!strcmp(action, "route-add")) result = dtun_nl_route_add(ifindex, tunnel_id, prefix, prefix_len);

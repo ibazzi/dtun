@@ -20,6 +20,8 @@ static const struct nla_policy dtun_nl_policy[DTUN_A_MAX + 1] = {
 	[DTUN_A_CANDIDATE_GENERATION] = { .type = NLA_U64 },
 	[DTUN_A_RENDEZVOUS_UDP_ADDR] = { .type = NLA_BINARY, .len = sizeof(__be32) },
 	[DTUN_A_RENDEZVOUS_UDP_PORT] = { .type = NLA_U16 },
+	[DTUN_A_HUB_ADDR] = { .type = NLA_BINARY, .len = sizeof(__be32) },
+	[DTUN_A_HUB_PORT] = { .type = NLA_U16 },
 };
 
 struct dtun_peer_status_snapshot {
@@ -482,6 +484,35 @@ static int dtun_nl_rebind(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
+static int dtun_nl_hub_set(struct sk_buff *skb, struct genl_info *info)
+{
+	struct dtun_dev *d;
+	__be32 address;
+	__be16 port;
+
+	(void)skb;
+	if (!info->attrs[DTUN_A_HUB_ADDR] || !info->attrs[DTUN_A_HUB_PORT])
+		return -EINVAL;
+	memcpy(&address, nla_data(info->attrs[DTUN_A_HUB_ADDR]),
+	       sizeof(address));
+	port = nla_get_be16(info->attrs[DTUN_A_HUB_PORT]);
+	if (!address || !port)
+		return -EINVAL;
+	rtnl_lock();
+	d = dtun_nl_dev(info);
+	if (!d) {
+		rtnl_unlock();
+		return -ENODEV;
+	}
+	spin_lock_bh(&d->hub_lock);
+	d->hub_addr = address;
+	d->hub_port = port;
+	spin_unlock_bh(&d->hub_lock);
+	mod_delayed_work(system_wq, &d->probe_work, 0);
+	rtnl_unlock();
+	return 0;
+}
+
 static const struct genl_ops dtun_genl_ops[] = {
 	{ .cmd = DTUN_CMD_PEER_ADD, .flags = GENL_ADMIN_PERM,
 	  .policy = dtun_nl_policy, .doit = dtun_nl_peer_add },
@@ -500,6 +531,8 @@ static const struct genl_ops dtun_genl_ops[] = {
 	  .dumpit = dtun_nl_peer_list_dump, .done = dtun_nl_peer_list_done },
 	{ .cmd = DTUN_CMD_REBIND, .flags = GENL_ADMIN_PERM,
 	  .policy = dtun_nl_policy, .doit = dtun_nl_rebind },
+	{ .cmd = DTUN_CMD_HUB_SET, .flags = GENL_ADMIN_PERM,
+	  .policy = dtun_nl_policy, .doit = dtun_nl_hub_set },
 };
 
 static const struct genl_multicast_group dtun_genl_groups[] = {

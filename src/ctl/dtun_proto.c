@@ -207,6 +207,35 @@ ssize_t dtrg_pack_refresh_ack(const uint8_t *key, uint64_t node_id,
     return (ssize_t)(body_len + DTRG_TAG_LEN);
 }
 
+ssize_t dtrg_pack_hub_list(const uint8_t *key, uint64_t node_id,
+                           const uint8_t cluster_id[16], uint64_t term,
+                           uint8_t ha_mode, uint16_t failover_timeout,
+                           const dtrg_hub_t *hubs, uint8_t hub_count,
+                           uint8_t *out, size_t max_len) {
+    const size_t item_len = DTRG_HUB_ID_LEN + 4 + 2 + 2 + 2 + 32 + 1;
+    size_t body_len = 4 + 1 + 8 + 16 + 8 + 1 + 2 + 1 +
+                      (size_t)hub_count * item_len;
+    uint8_t *p = out;
+    if (!cluster_id || hub_count > DTRG_MAX_HUBS ||
+        (hub_count && !hubs) || max_len < body_len + DTRG_TAG_LEN) return -1;
+    memcpy(p,DTRG_MAGIC,4);p+=4;*p++=DTRG_HUB_LIST;
+    uint64_t value=hton64(node_id);memcpy(p,&value,8);p+=8;
+    memcpy(p,cluster_id,16);p+=16;value=hton64(term);memcpy(p,&value,8);p+=8;
+    *p++=ha_mode;uint16_t word=htons(failover_timeout);memcpy(p,&word,2);p+=2;
+    *p++=hub_count;
+    for(uint8_t i=0;i<hub_count;i++){
+        memset(p,0,DTRG_HUB_ID_LEN);
+        memcpy(p,hubs[i].hub_id,strnlen(hubs[i].hub_id,DTRG_HUB_ID_LEN-1));p+=DTRG_HUB_ID_LEN;
+        memcpy(p,&hubs[i].address.s_addr,4);p+=4;
+        word=htons(hubs[i].control_port);memcpy(p,&word,2);p+=2;
+        word=htons(hubs[i].data_port);memcpy(p,&word,2);p+=2;
+        word=htons(hubs[i].weight);memcpy(p,&word,2);p+=2;
+        memcpy(p,hubs[i].public_key,32);p+=32;*p++=hubs[i].flags;
+    }
+    dtrg_hmac(key,DTRG_KEY_LEN,out,body_len,p);
+    return (ssize_t)(body_len+DTRG_TAG_LEN);
+}
+
 int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len, dtrg_msg_t *msg) {
     if (!msg) return -1;
     memset(msg, 0, sizeof(*msg));
@@ -318,6 +347,28 @@ int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len, dtrg_msg_
         return 0;
     }
 
+    if (kind == DTRG_HUB_LIST) {
+        const size_t header_len = 4 + 1 + 8 + 16 + 8 + 1 + 2 + 1;
+        const size_t item_len = DTRG_HUB_ID_LEN + 4 + 2 + 2 + 2 + 32 + 1;
+        uint64_t value; uint16_t word; uint8_t count;
+        if (body_len < header_len) return -5;
+        memcpy(&value,p,8);msg->node_id=ntoh64(value);p+=8;
+        memcpy(msg->cluster_id,p,16);p+=16;memcpy(&value,p,8);msg->term=ntoh64(value);p+=8;
+        msg->ha_mode=*p++;memcpy(&word,p,2);msg->failover_timeout=ntohs(word);p+=2;count=*p++;
+        if(count>DTRG_MAX_HUBS||body_len!=header_len+(size_t)count*item_len)return -5;
+        if(count){msg->hubs=calloc(count,sizeof(*msg->hubs));if(!msg->hubs)return -7;}
+        msg->hub_count=count;
+        for(uint8_t i=0;i<count;i++){
+            memcpy(msg->hubs[i].hub_id,p,DTRG_HUB_ID_LEN);msg->hubs[i].hub_id[DTRG_HUB_ID_LEN-1]='\0';p+=DTRG_HUB_ID_LEN;
+            memcpy(&msg->hubs[i].address.s_addr,p,4);p+=4;
+            memcpy(&word,p,2);msg->hubs[i].control_port=ntohs(word);p+=2;
+            memcpy(&word,p,2);msg->hubs[i].data_port=ntohs(word);p+=2;
+            memcpy(&word,p,2);msg->hubs[i].weight=ntohs(word);p+=2;
+            memcpy(msg->hubs[i].public_key,p,32);p+=32;msg->hubs[i].flags=*p++;
+        }
+        return 0;
+    }
+
     if (kind == DTRG_REFRESH_ACK) {
         const size_t header_len = 4 + 1 + 8 + 16 + 8 + 8 + 4 + 2 + 1 + 2 + 2;
         const size_t peer_wire_len = 8 + 4 + 4 + 4 + 4 + 4 + 2 + 8 + 1;
@@ -357,9 +408,11 @@ int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len, dtrg_msg_
 }
 
 void dtrg_msg_free(dtrg_msg_t *msg) {
-    if (msg && msg->peers) {
-        free(msg->peers);
-        msg->peers = NULL;
-        msg->peer_count = 0;
-    }
+    if (!msg) return;
+    free(msg->peers);
+    free(msg->hubs);
+    msg->peers = NULL;
+    msg->hubs = NULL;
+    msg->peer_count = 0;
+    msg->hub_count = 0;
 }

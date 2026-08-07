@@ -1,4 +1,6 @@
 #include "ini_parser.h"
+#include "dtun_ha_defaults.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +31,7 @@ void dtun_config_init(dtun_config_t *config) {
     config->path_timeout_ms = 3000;
     config->refresh_interval_ms = 1000;
     config->fast_recovery = 1;
+    config->raw_transport = 1;
     config->node_id = 0;
     config->address = strdup_safe("0.0.0.0/24");
     config->psk_hex = NULL;
@@ -47,6 +50,26 @@ void dtun_config_init(dtun_config_t *config) {
     config->interval = 20;
     config->timeout = 5;
     config->once = 0;
+    config->spoke_state_file = strdup_safe("/var/lib/dtun/spoke-ha.state");
+
+    config->ha_config = NULL;
+    config->ha_enabled = 0;
+    config->ha_format_version = 0;
+    config->ha_cluster_id = NULL;
+    config->ha_hub_id = NULL;
+    config->ha_role = NULL;
+    config->ha_identity_key = NULL;
+    config->ha_state_file = strdup_safe(DTUN_HA_STATE_PATH);
+    config->ha_bootstrap_address = NULL;
+    config->ha_port = DTUN_HA_PORT;
+    config->ha_weight = 1000;
+    config->failover_timeout = DTUN_HA_FAILOVER_TIMEOUT;
+    config->failback = strdup_safe("immediate");
+    config->recovery_stable_time = 120;
+    config->min_backup_active_time = 300;
+    config->failback_probation_time = 120;
+    config->failback_backoff = strdup_safe("300,900,1800");
+    config->failback_backoff_reset_time = 1800;
 }
 
 void dtun_config_free(dtun_config_t *config) {
@@ -60,18 +83,91 @@ void dtun_config_free(dtun_config_t *config) {
     free(config->pool);
     free(config->state_file);
     free(config->hub_address);
+    free(config->spoke_state_file);
+    free(config->ha_config);
+    free(config->ha_cluster_id);
+    free(config->ha_hub_id);
+    free(config->ha_role);
+    free(config->ha_identity_key);
+    free(config->ha_state_file);
+    free(config->ha_bootstrap_address);
+    free(config->failback);
+    free(config->failback_backoff);
     memset(config, 0, sizeof(*config));
 }
 
-int dtun_config_load(dtun_config_t *config, const char *filepath) {
+static void replace_string(char **target, const char *value)
+{
+    free(*target);
+    *target = strdup_safe(value);
+}
+
+static void apply_value(dtun_config_t *c, const char *section,
+                        const char *key, const char *val)
+{
+#define STRING_VALUE(name, field) \
+    if (!strcmp(key, name)) { replace_string(&c->field, val); return; }
+#define INT_VALUE(name, field) \
+    if (!strcmp(key, name)) { c->field = atoi(val); return; }
+    STRING_VALUE("mode", mode)
+    STRING_VALUE("interface", interface)
+    STRING_VALUE("local_outer_ip", local_outer_ip)
+    INT_VALUE("data_port", data_port)
+    INT_VALUE("probe_interval_ms", probe_interval_ms)
+    INT_VALUE("path_timeout_ms", path_timeout_ms)
+    INT_VALUE("refresh_interval_ms", refresh_interval_ms)
+    if (!strcmp(key, "fast_recovery")) { c->fast_recovery = !strcmp(val, "true") || !strcmp(val, "1"); return; }
+    if (!strcmp(key, "raw_transport")) { c->raw_transport = strcmp(val, "false") && strcmp(val, "0"); return; }
+    if (!strcmp(key, "node_id")) { c->node_id = strtoul(val, NULL, 10); return; }
+    STRING_VALUE("address", address)
+    STRING_VALUE("psk", psk_hex)
+    STRING_VALUE("bind_address", bind_address)
+    INT_VALUE("bind_port", bind_port)
+    STRING_VALUE("pool", pool)
+    STRING_VALUE("state_file", state_file)
+    INT_VALUE("cookie_seconds", cookie_seconds)
+    INT_VALUE("peer_timeout", peer_timeout)
+    INT_VALUE("identity_retention", identity_retention)
+    STRING_VALUE("hub_address", hub_address)
+    STRING_VALUE("spoke_state_file", spoke_state_file)
+    INT_VALUE("hub_port", hub_port)
+    INT_VALUE("local_port", local_port)
+    INT_VALUE("interval", interval)
+    INT_VALUE("timeout", timeout)
+    if (!strcmp(key, "once")) { c->once = !strcmp(val, "true") || !strcmp(val, "1"); return; }
+    STRING_VALUE("ha_config", ha_config)
+    if ((!strcmp(key, "enabled") && !strcmp(section, "ha")) || !strcmp(key, "ha_enabled")) {
+        c->ha_enabled = !strcmp(val, "true") || !strcmp(val, "1"); return;
+    }
+    if (!strcmp(key, "format_version") && !strcmp(section, "ha")) {
+        c->ha_format_version = atoi(val); return;
+    }
+    STRING_VALUE("cluster_id", ha_cluster_id)
+    STRING_VALUE("hub_id", ha_hub_id)
+    if (!strcmp(key, "role") || !strcmp(key, "ha_role")) { replace_string(&c->ha_role, val); return; }
+    STRING_VALUE("identity_private_key", ha_identity_key)
+    STRING_VALUE("ha_state_file", ha_state_file)
+    STRING_VALUE("bootstrap_address", ha_bootstrap_address)
+    INT_VALUE("ha_port", ha_port)
+    INT_VALUE("weight", ha_weight)
+    INT_VALUE("failover_timeout", failover_timeout)
+    STRING_VALUE("failback", failback)
+    INT_VALUE("recovery_stable_time", recovery_stable_time)
+    INT_VALUE("min_backup_active_time", min_backup_active_time)
+    INT_VALUE("failback_probation_time", failback_probation_time)
+    STRING_VALUE("failback_backoff", failback_backoff)
+    INT_VALUE("failback_backoff_reset_time", failback_backoff_reset_time)
+#undef STRING_VALUE
+#undef INT_VALUE
+}
+
+static int parse_file(dtun_config_t *config, const char *filepath)
+{
     FILE *fp = fopen(filepath, "r");
     if (!fp) {
         perror("dtun_config_load: failed to open config file");
         return -1;
     }
-
-    dtun_config_init(config);
-
     char line[512];
     char section[64] = "";
 
@@ -101,66 +197,39 @@ int dtun_config_load(dtun_config_t *config, const char *filepath) {
         char *key = trim_whitespace(trimmed);
         char *val = trim_whitespace(eq + 1);
 
-        if (strcmp(key, "mode") == 0) {
-            free(config->mode);
-            config->mode = strdup_safe(val);
-        } else if (strcmp(key, "interface") == 0) {
-            free(config->interface);
-            config->interface = strdup_safe(val);
-        } else if (strcmp(key, "local_outer_ip") == 0) {
-            free(config->local_outer_ip);
-            config->local_outer_ip = strdup_safe(val);
-        } else if (strcmp(key, "data_port") == 0) {
-            config->data_port = atoi(val);
-        } else if (strcmp(key, "probe_interval_ms") == 0) {
-            config->probe_interval_ms = atoi(val);
-        } else if (strcmp(key, "path_timeout_ms") == 0) {
-            config->path_timeout_ms = atoi(val);
-        } else if (strcmp(key, "refresh_interval_ms") == 0) {
-            config->refresh_interval_ms = atoi(val);
-        } else if (strcmp(key, "fast_recovery") == 0) {
-            config->fast_recovery = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        } else if (strcmp(key, "node_id") == 0) {
-            config->node_id = strtoul(val, NULL, 10);
-        } else if (strcmp(key, "address") == 0) {
-            free(config->address);
-            config->address = strdup_safe(val);
-        } else if (strcmp(key, "psk") == 0) {
-            free(config->psk_hex);
-            config->psk_hex = strdup_safe(val);
-        } else if (strcmp(key, "bind_address") == 0) {
-            free(config->bind_address);
-            config->bind_address = strdup_safe(val);
-        } else if (strcmp(key, "bind_port") == 0) {
-            config->bind_port = atoi(val);
-        } else if (strcmp(key, "pool") == 0) {
-            free(config->pool);
-            config->pool = strdup_safe(val);
-        } else if (strcmp(key, "state_file") == 0) {
-            free(config->state_file);
-            config->state_file = strdup_safe(val);
-        } else if (strcmp(key, "cookie_seconds") == 0) {
-            config->cookie_seconds = atoi(val);
-        } else if (strcmp(key, "peer_timeout") == 0) {
-            config->peer_timeout = atoi(val);
-        } else if (strcmp(key, "identity_retention") == 0) {
-            config->identity_retention = atoi(val);
-        } else if (strcmp(key, "hub_address") == 0) {
-            free(config->hub_address);
-            config->hub_address = strdup_safe(val);
-        } else if (strcmp(key, "hub_port") == 0) {
-            config->hub_port = atoi(val);
-        } else if (strcmp(key, "local_port") == 0) {
-            config->local_port = atoi(val);
-        } else if (strcmp(key, "interval") == 0) {
-            config->interval = atoi(val);
-        } else if (strcmp(key, "timeout") == 0) {
-            config->timeout = atoi(val);
-        } else if (strcmp(key, "once") == 0) {
-            config->once = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        }
+        apply_value(config, section, key, val);
     }
-
     fclose(fp);
     return 0;
+}
+
+int dtun_config_load(dtun_config_t *config, const char *filepath)
+{
+    char *overlay = NULL;
+    dtun_config_init(config);
+    if (parse_file(config, filepath) < 0) return -1;
+    if (config->ha_config && strcmp(filepath, config->ha_config)) {
+        overlay = strdup_safe(config->ha_config);
+        if (!overlay || parse_file(config, overlay) < 0) {
+            free(overlay);
+            return -1;
+        }
+    } else if (!config->ha_config && strcmp(filepath, DTUN_HA_CONFIG_PATH)) {
+        FILE *probe = fopen(DTUN_HA_CONFIG_PATH, "r");
+        if (probe) {
+            fclose(probe);
+            if (parse_file(config, DTUN_HA_CONFIG_PATH) < 0) return -1;
+        } else if (errno != ENOENT) {
+            perror("dtun_config_load: failed to inspect default HA config");
+            return -1;
+        }
+    }
+    free(overlay);
+    return 0;
+}
+
+int dtun_config_load_base(dtun_config_t *config, const char *filepath)
+{
+    dtun_config_init(config);
+    return parse_file(config, filepath);
 }

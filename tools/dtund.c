@@ -1,6 +1,9 @@
 #include "../../src/ctl/dtun_netlink.h"
 #include "../../src/ctl/dtun_proto.h"
 #include "../../src/ctl/ini_parser.h"
+#include "dtund_ha_service.h"
+#include "dtund_spoke_ha.h"
+#include "../../src/ctl/dtun_ha_state.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,6 +31,7 @@
 #define HUB_STATE_MAGIC "DTSF"
 
 static volatile sig_atomic_t g_running = 1;
+static dtund_ha_service_t *g_ha_service;
 
 typedef struct {
     uint64_t node_id;
@@ -103,6 +107,7 @@ static hub_change_t g_hub_changes[HUB_CHANGE_LOG_SIZE];
 static size_t g_hub_change_head;
 static size_t g_hub_change_count;
 static int g_hub_state_dirty;
+static int g_raw_transport = 1;
 
 static void hub_note_change(uint64_t node_id)
 {
@@ -901,7 +906,7 @@ static int refresh_hub_candidates(uint32_t ifindex)
             continue;
         node->udp_addr = status.direct_udp_addr;
         node->udp_port = status.direct_udp_port;
-        node->raw = status.direct_udp_addr;
+        node->raw.s_addr = g_raw_transport ? status.direct_udp_addr.s_addr : 0;
         node->generation++;
         if (!node->generation) node->generation++;
         hub_note_change(node->node_id);
@@ -927,7 +932,7 @@ static int fill_sync_peer(uint64_t requester, uint64_t other_id,
     session = hub_session(requester, other_id);
     if (!session) return -1;
     peer->address = other->address;
-    peer->raw = other->raw;
+    if (g_raw_transport) peer->raw = other->raw;
     peer->udp_addr = other->udp_addr;
     peer->udp_port = other->udp_port;
     peer->generation = other->generation;
@@ -998,6 +1003,9 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     struct sockaddr_in bind_address;
     struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
     uint8_t rx[DTRG_MAX_PACKET], tx[DTRG_MAX_PACKET];
+    int demoted = 0;
+    time_t ha_active_since = time(NULL);
+    int ha_backoff_reset = 0;
 
     if (inet_pton(AF_INET, config->local_outer_ip, &outer_address) != 1 ||
         parse_cidr(config->address, &inner_address, &prefix_len) < 0) {
@@ -1020,9 +1028,12 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 return 1;
             g_hub_state.nodes[i].refresh_counter = 0;
         }
-        if (hub_save_state(config->state_file) < 0)
-            return 1;
     }
+    /* Persist even a newly initialized, empty state before the HA service
+     * serves its first snapshot.  Otherwise a fresh backup cannot complete
+     * its initial replication until the first Spoke happens to register. */
+    if (hub_save_state(config->state_file) < 0)
+        return 1;
     if (dtun_module_ensure_loaded() < 0)
         return 1;
     created_ifindex = dtun_link_create(config->interface, outer_address,
@@ -1087,6 +1098,36 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
            config->bind_address, config->bind_port);
     fflush(stdout);
     while (g_running) {
+        if (config->ha_enabled) {
+            dtun_ha_state_t state;
+            int state_loaded =
+                dtun_ha_state_load(config->ha_state_file, &state) == 0;
+            if (state_loaded &&
+                strcmp(state.leader_id, state.local_hub_id)) {
+                if (config->ha_role && !strcmp(config->ha_role, "primary") &&
+                    time(NULL) - ha_active_since <=
+                    config->failback_probation_time) {
+                    if (state.failback_level < 3) state.failback_level++;
+                    state.commit_index++;
+                    (void)dtun_ha_state_save(config->ha_state_file, &state);
+                }
+                printf("[dtund HA] Local Hub demoted by term %llu leader %s\n",
+                       (unsigned long long)state.term, state.leader_id);
+                fflush(stdout);
+                demoted = 1;
+                break;
+            }
+            if (state_loaded && !ha_backoff_reset && config->ha_role &&
+                !strcmp(config->ha_role, "primary") &&
+                state.failback_level &&
+                time(NULL) - ha_active_since >=
+                config->failback_backoff_reset_time) {
+                state.failback_level = 0;
+                state.commit_index++;
+                if (dtun_ha_state_save(config->ha_state_file, &state) == 0)
+                    ha_backoff_reset = 1;
+            }
+        }
         struct sockaddr_in source;
         socklen_t source_len = sizeof(source);
         ssize_t length = recvfrom(sock, rx, sizeof(rx), 0,
@@ -1121,6 +1162,8 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         } else if (message.kind == DTRG_CONFIRM &&
                    validate_cookie(config, &source, &message)) {
             char allocation_error[160];
+            int allocation_is_new = !message.node_id ||
+                                    node_by_id(message.node_id) == NULL;
             hub_node_record_t *record = hub_allocate_node(
                 config, inner_address, message.node_id, message.address,
                 message.prefix_len, allocation_error, sizeof(allocation_error));
@@ -1193,6 +1236,18 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                     dtrg_msg_free(&message);
                     continue;
                 }
+                if (config->ha_enabled &&
+                    (!(config->ha_role &&
+                       !strcmp(config->ha_role, "backup") &&
+                       !allocation_is_new)) &&
+                    dtund_ha_wait_replicated(g_ha_service,
+                                             config->state_file,
+                                             config->timeout) < 0) {
+                    fprintf(stderr,
+                            "[dtund HA] Registration allocation retained but not acknowledged: no synchronized backup\n");
+                    dtrg_msg_free(&message);
+                    continue;
+                }
                 g_hub_state_dirty = 0;
                 packed = dtrg_pack_ack(psk, record->node_id,
                                        record->tunnel_id,
@@ -1208,6 +1263,12 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 packed = dtrg_pack_sync(psk, record->node_id,
                                         message.nonce, sync_peers, sync_count,
                                         tx, sizeof(tx));
+                if (packed > 0)
+                    (void)sendto(sock, tx, (size_t)packed, 0,
+                                 (struct sockaddr *)&source, source_len);
+                packed = dtund_ha_pack_hub_list(config, psk,
+                                                 record->node_id,
+                                                 tx, sizeof(tx));
                 if (packed > 0)
                     (void)sendto(sock, tx, (size_t)packed, 0,
                                  (struct sockaddr *)&source, source_len);
@@ -1274,6 +1335,14 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             if (packed > 0)
                 (void)sendto(sock, refresh_tx, (size_t)packed, 0,
                              (struct sockaddr *)&source, source_len);
+            if (!(flags & DTRG_REFRESH_MORE)) {
+                packed = dtund_ha_pack_hub_list(config, psk,
+                                                 record->node_id,
+                                                 tx, sizeof(tx));
+                if (packed > 0)
+                    (void)sendto(sock, tx, (size_t)packed, 0,
+                                 (struct sockaddr *)&source, source_len);
+            }
             if (candidates_changed || g_hub_state_dirty) {
                 if (hub_save_state(config->state_file) == 0)
                     g_hub_state_dirty = 0;
@@ -1285,7 +1354,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     close(sock);
     dtun_link_delete_by_name(config->interface);
     dtun_module_unload_if_needed();
-    return 0;
+    return demoted ? 2 : 0;
 
 fail_link:
     dtun_link_delete_by_name(config->interface);
@@ -1363,7 +1432,7 @@ static int apply_peer_item(uint32_t ifindex, const dtrg_sync_peer_t *item,
     peer.tunnel_id = item->tunnel_id;
     peer.remote_tunnel_id = item->remote_tunnel_id;
     peer.node_id = item->node_id;
-    peer.raw_addr = item->raw;
+    if (g_raw_transport) peer.raw_addr = item->raw;
     peer.udp_addr = item->udp_addr;
     peer.udp_port = item->udp_port;
     peer.dynamic_raw = 1;
@@ -1443,8 +1512,13 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
     int have_lease = 0, refresh_failures = 0;
     int registered_once = 0;
     int result = 1;
+    dtund_spoke_ha_t spoke_ha;
 
     memset(applied, 0, sizeof(applied));
+    dtund_spoke_ha_init(&spoke_ha, time(NULL));
+    if (config->spoke_state_file)
+        (void)dtund_spoke_ha_load(&spoke_ha,
+                                  config->spoke_state_file, time(NULL));
     if (!config->hub_address ||
         inet_pton(AF_INET, config->hub_address, &hub_control.sin_addr) != 1 ||
         parse_cidr(config->address, &requested_address,
@@ -1522,23 +1596,45 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                     refresh_ok = 0;
                     break;
                 }
-                source_len = sizeof(source);
-                refresh_length = recvfrom(sock, rx, sizeof(rx), 0,
-                                          (struct sockaddr *)&source,
-                                          &source_len);
-                if (refresh_length <= 0 ||
-                    !same_endpoint(&source, &hub_control) ||
-                    dtrg_parse(psk, rx, (size_t)refresh_length,
-                               &refresh_reply) < 0 ||
-                    refresh_reply.kind != DTRG_REFRESH_ACK ||
-                    refresh_reply.node_id != assigned_node ||
-                    refresh_reply.counter != refresh_counter ||
-                    CRYPTO_memcmp(refresh_reply.lease_token, lease_token,
-                                  sizeof(lease_token)) != 0) {
-                    dtrg_msg_free(&refresh_reply);
-                    refresh_ok = 0;
+                for (;;) {
+                    source_len = sizeof(source);
+                    refresh_length = recvfrom(sock, rx, sizeof(rx), 0,
+                                              (struct sockaddr *)&source,
+                                              &source_len);
+                    if (refresh_length <= 0 ||
+                        !same_endpoint(&source, &hub_control) ||
+                        dtrg_parse(psk, rx, (size_t)refresh_length,
+                                   &refresh_reply) < 0) {
+                        dtrg_msg_free(&refresh_reply);
+                        refresh_ok = 0;
+                        break;
+                    }
+                    /* HUB_LIST follows each ACK.  UDP delivery may leave it
+                     * queued until the next refresh; consume and persist it
+                     * instead of permanently shifting the ACK stream by one
+                     * datagram. */
+                    if (refresh_reply.kind == DTRG_HUB_LIST &&
+                        refresh_reply.node_id == assigned_node) {
+                        if (dtund_spoke_ha_update(&spoke_ha, &refresh_reply,
+                                                  time(NULL)) == 0 &&
+                            config->spoke_state_file)
+                            (void)dtund_spoke_ha_save(
+                                &spoke_ha, config->spoke_state_file);
+                        dtrg_msg_free(&refresh_reply);
+                        memset(&refresh_reply, 0, sizeof(refresh_reply));
+                        continue;
+                    }
+                    if (refresh_reply.kind != DTRG_REFRESH_ACK ||
+                        refresh_reply.node_id != assigned_node ||
+                        refresh_reply.counter != refresh_counter ||
+                        CRYPTO_memcmp(refresh_reply.lease_token, lease_token,
+                                      sizeof(lease_token)) != 0) {
+                        dtrg_msg_free(&refresh_reply);
+                        refresh_ok = 0;
+                    }
                     break;
                 }
+                if (!refresh_ok) break;
                 if (refresh_reply.flags & DTRG_REFRESH_RE_REGISTER) {
                     force_register = 1;
                     refresh_ok = 0;
@@ -1584,7 +1680,25 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                 }
             } while (g_running);
             if (refresh_ok) {
+                dtrg_msg_t hub_update;
+                memset(&hub_update, 0, sizeof(hub_update));
+                source_len = sizeof(source);
+                ssize_t hub_length = recvfrom(
+                    sock, rx, sizeof(rx), MSG_DONTWAIT,
+                    (struct sockaddr *)&source, &source_len);
+                if (hub_length > 0 && same_endpoint(&source, &hub_control) &&
+                    dtrg_parse(psk, rx, (size_t)hub_length,
+                               &hub_update) == 0 &&
+                    hub_update.kind == DTRG_HUB_LIST &&
+                    hub_update.node_id == assigned_node)
+                    if (dtund_spoke_ha_update(&spoke_ha, &hub_update,
+                                               time(NULL)) == 0 &&
+                        config->spoke_state_file)
+                        (void)dtund_spoke_ha_save(
+                            &spoke_ha, config->spoke_state_file);
+                dtrg_msg_free(&hub_update);
                 refresh_failures = 0;
+                dtund_spoke_ha_seen(&spoke_ha, time(NULL));
                 result = 0;
                 if (config->once) break;
                 for (int waited = 0;
@@ -1600,6 +1714,32 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             }
             have_lease = 0;
             refresh_failures = 0;
+        }
+
+        if (!have_lease && dtund_spoke_ha_failover(&spoke_ha,
+                                                    &hub_control,
+                                                    time(NULL))) {
+            char endpoint[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &hub_control.sin_addr, endpoint,
+                      sizeof(endpoint));
+            printf("[dtund Spoke] Leader timeout; trying backup Hub %s:%u\n",
+                   endpoint, ntohs(hub_control.sin_port));
+            fflush(stdout);
+        }
+
+        /* A lost registration ACK can leave the following SYNC/HUB_LIST (or
+         * a CHALLENGE from an abandoned nonce) queued on this UDP socket.
+         * Reusing such a datagram as the next CHALLENGE keeps the client
+         * permanently one packet behind on a lossy WAN.  A full registration
+         * has no valid in-flight response yet, so discard stale control
+         * datagrams before creating its new nonce. */
+        if (!have_lease) {
+            for (;;) {
+                source_len = sizeof(source);
+                length = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT,
+                                  (struct sockaddr *)&source, &source_len);
+                if (length <= 0) break;
+            }
         }
 
         memset(&challenge, 0, sizeof(challenge));
@@ -1704,7 +1844,12 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
             peer.tunnel_id = ack.tunnel_id;
             peer.remote_tunnel_id = ack.remote_tunnel_id;
             peer.node_id = 1;
-            peer.raw_addr = hub_control.sin_addr;
+            /* The Hub endpoint is learned and migrated as an address/port
+             * pair.  Keep that control-plane contract on UDP: cloud networks
+             * may pass raw probes while dropping real raw-IP payloads, which
+             * otherwise makes path selection report healthy but blackholes
+             * Spoke traffic.  Direct Spoke peers may still negotiate raw. */
+            peer.raw_addr.s_addr = 0;
             peer.udp_addr = hub_control.sin_addr;
             peer.udp_port = ack.data_port;
             peer.dynamic_raw = 0;
@@ -1729,6 +1874,25 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
                            &applied_count) < 0)
                 goto attempt_done;
         }
+        {
+            dtrg_msg_t hub_list;
+            memset(&hub_list, 0, sizeof(hub_list));
+            usleep(10000);
+            source_len = sizeof(source);
+            length = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT,
+                              (struct sockaddr *)&source, &source_len);
+            if (length > 0 && same_endpoint(&source, &hub_control) &&
+                dtrg_parse(psk, rx, (size_t)length, &hub_list) == 0 &&
+                hub_list.kind == DTRG_HUB_LIST &&
+                hub_list.node_id == ack.node_id) {
+                if (dtund_spoke_ha_update(&spoke_ha, &hub_list,
+                                           time(NULL)) == 0 &&
+                    config->spoke_state_file)
+                    (void)dtund_spoke_ha_save(&spoke_ha,
+                                               config->spoke_state_file);
+            }
+            dtrg_msg_free(&hub_list);
+        }
         requested_address = ack.address;
         requested_prefix = ack.prefix_len;
         config->node_id = ack.node_id;
@@ -1738,6 +1902,10 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk)
         refresh_epoch = 0;
         refresh_counter = 0;
         have_lease = 1;
+        dtund_spoke_ha_seen(&spoke_ha, time(NULL));
+        if (ifindex)
+            (void)dtun_nl_hub_set(ifindex, hub_control.sin_addr,
+                                  ack.data_port);
         success = 1;
         registered_once = 1;
         result = 0;
@@ -1778,6 +1946,7 @@ int main(int argc, char **argv)
     uint8_t psk[32];
     int has_psk;
     int result;
+    dtund_ha_service_t *ha_service = NULL;
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -1795,6 +1964,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (dtun_config_load(&config, config_file) < 0) return 1;
+    g_raw_transport = config.raw_transport;
     if (override_mode) {
         free(config.mode);
         config.mode = strdup(override_mode);
@@ -1809,14 +1979,63 @@ int main(int argc, char **argv)
         dtun_config_free(&config);
         return 1;
     }
-    if (!strcmp(config.mode, "hub"))
-        result = run_hub(&config, psk, has_psk);
+    if (!strcmp(config.mode, "hub") && config.ha_enabled &&
+        dtund_ha_service_start(&ha_service, &config) < 0) {
+        fprintf(stderr, "Failed to start HA service\n");
+        result = 1;
+    } else if (!strcmp(config.mode, "hub")) {
+        g_ha_service = ha_service;
+        if (config.ha_enabled) {
+            dtun_ha_state_t ha_state;
+ha_cycle:
+            (void)dtund_ha_discover_leader(&config);
+            if (dtun_ha_state_load(config.ha_state_file, &ha_state) < 0) {
+                fprintf(stderr, "Failed to load HA state\n");
+                result = 1;
+                goto daemon_done;
+            }
+            if (strcmp(ha_state.leader_id, ha_state.local_hub_id)) {
+            time_t last_seen = time(NULL);
+            time_t stable_since = 0;
+            int promoted = 0;
+            printf("[dtund HA] Standby Hub waiting for active leader\n");
+            while (g_running && !promoted) {
+                int step;
+                if (config.ha_role && !strcmp(config.ha_role, "primary")) {
+                    step = dtund_ha_recover_primary_step(&config,
+                                                          &stable_since);
+                    /* A recovered preferred primary remains a normal standby
+                     * while the backup is active.  If that active backup now
+                     * fails, do not wait forever for a cooperative failback:
+                     * apply the same direct-pair/quorum failover timer. */
+                    if (step == 0)
+                        step = dtund_ha_standby_step(&config, &last_seen);
+                } else
+                    step = dtund_ha_standby_step(&config, &last_seen);
+                if (step < 0) { result = 1; break; }
+                promoted = step > 0;
+                if (!promoted) sleep(1);
+            }
+            if (promoted && g_running) result = run_hub(&config, psk, has_psk);
+            else if (!g_running) result = 0;
+            } else {
+                result = run_hub(&config, psk, has_psk);
+            }
+            if (result == 2 && g_running)
+                goto ha_cycle;
+        } else {
+            result = run_hub(&config, psk, has_psk);
+        }
+    }
     else if (!strcmp(config.mode, "spoke"))
         result = run_spoke(&config, psk, has_psk);
     else {
         fprintf(stderr, "Unknown mode: %s\n", config.mode);
         result = 1;
     }
+daemon_done:
+    dtund_ha_service_stop(ha_service);
+    g_ha_service = NULL;
     OPENSSL_cleanse(psk, sizeof(psk));
     dtun_nl_close();
     dtun_config_free(&config);

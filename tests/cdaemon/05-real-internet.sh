@@ -1,12 +1,15 @@
 #!/bin/bash
-# Real-internet test: local C spoke -> remote public C hub (150.158.214.148).
+# Real-internet test: local C spoke -> caller-supplied remote public C hub.
 # Conservative public-WAN traffic profile: short directional TCP/UDP runs and
 # a modest single-direction UDP soak, avoiding unnecessary provider egress.
 set -eu
 cd "$(dirname "$0")/../.."
 . tests/cdaemon/lib.sh
 
-HUB_PUB=150.158.214.148
+HUB_PUB=${1:-${HUB_PUB:-}}
+case $HUB_PUB in
+	''|*[!0-9.]*) echo "usage: $0 HUB_PUBLIC_IPV4" >&2; exit 2 ;;
+esac
 OUT=/tmp/dtun-real
 mkdir -p "$OUT"
 

@@ -99,6 +99,7 @@ struct dtun_dev {
 	__be32 hub_addr;
 	__be16 udp_port;
 	__be16 hub_port;
+	spinlock_t hub_lock;
 	u64 node_id;
 	struct socket *udp_sock;
 	u32 probe_interval_ms;
@@ -120,6 +121,7 @@ enum dtun_nl_cmd {
 	DTUN_CMD_STATS_GET,
 	DTUN_CMD_PEER_LIST,
 	DTUN_CMD_REBIND,
+	DTUN_CMD_HUB_SET,
 	__DTUN_CMD_MAX,
 };
 #define DTUN_CMD_MAX (__DTUN_CMD_MAX - 1)
@@ -147,6 +149,8 @@ enum dtun_nl_attr {
 	DTUN_A_DIRECT_UDP_PORT,
 	DTUN_A_RAW_VALIDATED_ADDR,
 	DTUN_A_SELECTED_PATH,
+	DTUN_A_HUB_ADDR,
+	DTUN_A_HUB_PORT,
 	__DTUN_A_MAX,
 };
 #define DTUN_A_MAX (__DTUN_A_MAX - 1)

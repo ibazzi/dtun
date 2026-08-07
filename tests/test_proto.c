@@ -28,12 +28,15 @@ int main(void)
     struct in_addr address, raw;
     dtrg_msg_t message;
     dtrg_sync_peer_t peers[2];
+    dtrg_hub_t hubs[2];
+    uint8_t cluster_id[16];
     ssize_t length;
 
     memset(key, 0x5a, sizeof(key));
     memset(nonce, 0xa5, sizeof(nonce));
     memset(cookie, 0x3c, sizeof(cookie));
     memset(lease_token, 0x7e, sizeof(lease_token));
+    memset(cluster_id, 0x19, sizeof(cluster_id));
     CHECK(inet_pton(AF_INET, "10.99.0.2", &address) == 1);
     CHECK(inet_pton(AF_INET, "192.0.2.2", &raw) == 1);
 
@@ -45,6 +48,26 @@ int main(void)
     CHECK(message.address.s_addr == address.s_addr &&
           message.raw.s_addr == raw.s_addr && message.prefix_len == 24);
     CHECK(same_nonce(message.nonce, nonce));
+    dtrg_msg_free(&message);
+
+    memset(hubs, 0, sizeof(hubs));
+    strcpy(hubs[0].hub_id, "hub-primary");
+    strcpy(hubs[1].hub_id, "hub-backup-1");
+    CHECK(inet_pton(AF_INET, "192.0.2.1", &hubs[0].address) == 1);
+    CHECK(inet_pton(AF_INET, "192.0.2.2", &hubs[1].address) == 1);
+    hubs[0].control_port = hubs[1].control_port = 49001;
+    hubs[0].data_port = hubs[1].data_port = 49000;
+    hubs[0].weight = 1000; hubs[1].weight = 900;
+    hubs[0].flags = DTRG_HUB_ACTIVE;
+    memset(hubs[0].public_key, 1, 32); memset(hubs[1].public_key, 2, 32);
+    length = dtrg_pack_hub_list(key, 2, cluster_id, 7,
+                                DTRG_HA_MODE_DIRECT_PAIR, 30,
+                                hubs, 2, packet, sizeof(packet));
+    CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
+    CHECK(message.kind == DTRG_HUB_LIST && message.term == 7 &&
+          message.hub_count == 2 && message.failover_timeout == 30 &&
+          !strcmp(message.hubs[1].hub_id, "hub-backup-1") &&
+          message.hubs[1].weight == 900);
     dtrg_msg_free(&message);
 
     length = dtrg_pack_challenge(key, 2, address, 24, raw, nonce, cookie,

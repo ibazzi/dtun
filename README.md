@@ -1,5 +1,9 @@
 # dtun
 
+dtun 支持可选的多 Hub 高可用模式：备 Hub通过一次性 Invite ID在线加入，一主一备
+可直接接管，三个及以上 Hub使用加权多数派选主。Spoke会动态学习 Hub列表并在活动
+Hub长期离线后切换。部署步骤见 [docs/guide.md](docs/guide.md)。
+
 [English](README.en.md) | **简体中文**
 
 `dtun` 是面向 Linux 6.6 及更高版本的树外 L3 隧道原型。数据帧可以直接承载于
@@ -73,6 +77,7 @@ make check          # C 单元测试与脚本语法检查，不需要 root
 make test           # 双 namespace 数据面回归，需要 root
 make p2mp-test      # Hub + 双 Spoke 直连回归，需要 root
 sudo bash tests/cdaemon/run-all.sh
+tests/ha-real/run.sh root@<PRIMARY_IP> root@<BACKUP1_IP> root@<BACKUP2_IP>
 ```
 
 特权套件还需要 Python 3、`ping`、`iptables`、`tc`、`tcpdump` 和 `iperf3`。如需针对

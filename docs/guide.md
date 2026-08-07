@@ -78,6 +78,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
 | `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
 | `psk` | 无 | 32 字节 PSK 的 64 位十六进制表示；省略仅供不安全测试 |
+| `raw_transport` | `true` | 设为 `false` 时禁用 Raw IPv4候选，只使用 UDP及 Hub回退；适合 Raw探测假阳性的云网络 |
 
 ### `[hub]`
 
@@ -102,6 +103,21 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `refresh_interval_ms` | `1000` | 已注册会话的 DTRG 轻量刷新间隔 |
 | `timeout` | `5` | 每个控制响应的接收超时；非正数回退为 5 秒 |
 | `once` | `false` | 首次尝试后退出；成功时保留接口，失败时返回非零 |
+| `spoke_state_file` | `/var/lib/dtun/spoke-ha.state` | 持久化动态发现的 Hub 列表、权重和最高任期 |
+
+### `[ha]`
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `ha_config` | `/etc/dtun/ha/ha.conf` | 仅在使用非默认路径时指定生成的 HA 配置片段 |
+| `ha_port` | `49001` | Hub 间认证、复制和选举TCP端口；可与Spoke控制面UDP端口复用端口号 |
+| `failover_timeout` | `3` | 活动 Hub连续不可达后开始接管的秒数；回切防抖由独立稳定窗口控制 |
+| `failback` | `immediate` | `immediate` 在稳定门槛后回主；`sticky` 保持当前 Hub |
+| `recovery_stable_time` | `120` | 原主 Hub连续健康观察时间 |
+| `min_backup_active_time` | `300` | 备 Hub接管后的最短驻留时间 |
+| `failback_probation_time` | `120` | 回切后的观察期 |
+| `failback_backoff` | `300,900,1800` | 连续回切失败后的稳定窗口 |
+| `failback_backoff_reset_time` | `1800` | 主 Hub持续稳定后清除退避的时间 |
 
 ## 5. 部署 Hub
 
@@ -193,6 +209,64 @@ daemon 认为 `interface` 完全归自己管理；创建前会删除同名现有
 
 `once = true` 适合由其他进程接管接口生命周期：第一次注册成功后 daemon 退出并
 保留接口；第一次失败则退出且返回非零。
+
+## 6.1 部署高可用 Hub
+
+最小部署为一主一备。两节点中主 Hub超时后唯一备 Hub直接接管；三个及以上正式
+Hub 使用多数派选举，权重高的同步候选优先。两节点没有外部见证，因此网络分区时
+可能短暂双主，Spoke 通过持久化任期收敛。
+
+主 Hub 初始化：
+
+```sh
+sudo dtunctl ha init --hub-id hub-primary
+```
+
+默认主配置为 `/etc/dtun/dtun.conf`，生成的 `/etc/dtun/ha/ha.conf` 会被自动加载。
+使用非默认路径时才需要传入 `--config`、`--output-dir` 并在主配置中引用覆盖文件。
+启动 `dtund` 后创建邀请：
+
+```sh
+sudo dtunctl ha invite create --hub-id hub-backup-1 \
+  --weight 900 --expires 10m --format plain
+```
+
+主 Hub位于云 NAT 后、`local_outer_ip` 是私网地址时，只为 Invite 指定公网引导地址：
+
+```sh
+sudo dtunctl ha invite create --hub-id hub-backup-1 --weight 900 \
+  --bootstrap-address 203.0.113.10 --format plain
+```
+
+该参数不公告或覆盖任何备 Hub地址；备 Hub地址仍由认证连接自动发现。
+
+Invite ID 是短期、单次使用的入群密码。默认输出供人阅读；`--format plain`只输出
+Invite ID，`--format json`输出单行结构化数据。备 Hub不需要复制邀请文件：
+
+```sh
+sudo dtunctl ha join --config /etc/dtun/dtun.conf
+# 在隐藏提示中粘贴 Invite ID
+```
+
+备 Hub私钥只在本机生成。加入过程使用 Ed25519 身份、临时 X25519 密钥和 AES-GCM
+加密通道下发集群隧道配置。新 Hub先作为 learner 同步，追平后成为 voter。
+
+不配置 `advertise_address`。`local_outer_ip = 0.0.0.0` 时由系统路由选择源地址，活动
+Hub 从认证连接和控制/数据探测包自动记录实际端点。不可从其他成员访问的端点不会
+获得接管资格。
+
+常用检查和管理命令：
+
+```sh
+dtunctl ha status
+dtunctl ha members
+dtunctl ha invite list
+dtunctl ha member set-weight --hub-id hub-backup-1 --weight 950
+dtunctl ha failback
+```
+
+新增地址、node ID 和 tunnel/session ID 只有同步到备机（多节点时为多数派）后才
+确认。备机失联期间已有链路继续工作，但不会确认新的持久分配。
 
 ## 7. 直连、Hub 转发与回退
 

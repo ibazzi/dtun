@@ -567,6 +567,26 @@ int dtun_nl_rebind(uint32_t ifindex) {
                         attrs, off, NULL, NULL);
 }
 
+int dtun_nl_hub_set(uint32_t ifindex, struct in_addr hub_addr,
+                    uint16_t hub_port) {
+    char attrs[96];
+    int off = 0;
+    uint16_t port_be;
+    int err = dtun_nl_init();
+    if (err < 0) return err;
+    if (!ifindex || !hub_addr.s_addr || !hub_port) return -EINVAL;
+    off += pack_dtun_attr(attrs + off, sizeof(attrs) - off,
+                          DTUN_A_IFINDEX, &ifindex, sizeof(ifindex));
+    off += pack_dtun_attr(attrs + off, sizeof(attrs) - off,
+                          DTUN_A_HUB_ADDR, &hub_addr.s_addr,
+                          sizeof(hub_addr.s_addr));
+    port_be = htons(hub_port);
+    off += pack_dtun_attr(attrs + off, sizeof(attrs) - off,
+                          DTUN_A_HUB_PORT, &port_be, sizeof(port_be));
+    return genl_request(dtun_genl_family_id, DTUN_CMD_HUB_SET,
+                        attrs, off, NULL, NULL);
+}
+
 int dtun_nl_route_add(uint32_t ifindex, uint32_t tunnel_id, struct in_addr prefix, uint8_t prefix_len) {
     int init_error = dtun_nl_init();
     if (init_error < 0) return init_error;

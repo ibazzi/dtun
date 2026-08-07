@@ -1,0 +1,19 @@
+[global]
+mode = spoke
+interface = dtun-ha0
+local_outer_ip = 0.0.0.0
+data_port = 49000
+node_id = 2
+address = 10.77.0.2/24
+probe_interval_ms = 500
+path_timeout_ms = 1500
+raw_transport = false
+refresh_interval_ms = 500
+psk = @PSK@
+
+[spoke]
+hub_address = @PRIMARY_IP@
+hub_port = 49001
+local_port = 0
+timeout = 2
+spoke_state_file = /tmp/dtun-ha-real/spoke-local.state
