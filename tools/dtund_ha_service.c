@@ -300,13 +300,27 @@ int dtund_ha_standby_step(const dtun_config_t *c, time_t *last_seen) {
     *last_seen = now;
     return 0;
   }
+  char old_leader_id[DTUN_HA_ID_LEN];
+  snprintf(old_leader_id, sizeof(old_leader_id), "%s", state.leader_id);
   if (c->ha_bootstrap_address &&
       inet_pton(AF_INET, c->ha_bootstrap_address, &bootstrap) == 1 &&
       bootstrap.s_addr != leader->address.s_addr &&
+      (local->address.s_addr == 0 ||
+       bootstrap.s_addr != local->address.s_addr) &&
       dtun_ha_replica_client(bootstrap, leader->ha_port, &state,
                              c->ha_identity_key, c->ha_state_file,
                              c->state_file) == 0) {
-    *last_seen = now;
+    if (strcmp(state.leader_id, old_leader_id) != 0) {
+      dtun_ha_member_t *new_leader =
+          dtun_ha_member_find(&state, state.leader_id);
+      if (new_leader && !strcmp(new_leader->hub_id, state.local_hub_id))
+        return 1;
+      if (new_leader && new_leader->address.s_addr &&
+          dtun_ha_replica_client(new_leader->address, new_leader->ha_port,
+                                 &state, c->ha_identity_key, c->ha_state_file,
+                                 c->state_file) == 0)
+        *last_seen = now;
+    }
     return 0;
   }
   if (state.member_count == 2 && local->role == DTUN_HA_VOTER &&

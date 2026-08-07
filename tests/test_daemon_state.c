@@ -97,6 +97,78 @@ out:
     return result;
 }
 
+
+static int standby_step_failover_test(void)
+{
+    dtun_config_t config;
+    dtun_ha_state_t state, loaded;
+    char dir[] = "/tmp/dtun-standby-test-XXXXXX";
+    char key_path[256], state_path[256], hub_state_path[256];
+    uint8_t public_key[32];
+    time_t last_seen;
+    int result = -1;
+
+    if (!mkdtemp(dir)) goto out;
+    snprintf(key_path, sizeof(key_path), "%s/identity.key", dir);
+    snprintf(state_path, sizeof(state_path), "%s/ha.state", dir);
+    snprintf(hub_state_path, sizeof(hub_state_path), "%s/hub.state", dir);
+
+    if (dtun_ha_identity_generate(key_path, public_key) < 0) goto out;
+
+    dtun_config_init(&config);
+    config.ha_enabled = 1;
+    config.ha_hub_id = strdup("hub-primary");
+    config.ha_role = strdup("primary");
+    config.ha_state_file = strdup(state_path);
+    config.ha_identity_key = strdup(key_path);
+    config.state_file = strdup(hub_state_path);
+    config.ha_bootstrap_address = strdup("192.0.2.1");
+    config.failover_timeout = 3;
+
+    memset(&state, 0, sizeof(state));
+    dtun_ha_random_id(state.cluster_id, 16);
+    strcpy(state.local_hub_id, "hub-primary");
+    strcpy(state.leader_id, "hub-backup-1");
+    state.term = 1;
+    state.commit_index = 1;
+    state.member_count = 2;
+
+    strcpy(state.members[0].hub_id, "hub-primary");
+    memcpy(state.members[0].public_key, public_key, 32);
+    inet_pton(AF_INET, "192.0.2.1", &state.members[0].address);
+    state.members[0].weight = 1000;
+    state.members[0].role = DTUN_HA_VOTER;
+    state.members[0].enabled = 1;
+
+    strcpy(state.members[1].hub_id, "hub-backup-1");
+    memcpy(state.members[1].public_key, public_key, 32);
+    inet_pton(AF_INET, "192.0.2.2", &state.members[1].address);
+    state.members[1].ha_port = 59999; /* Unreachable port */
+    state.members[1].weight = 900;
+    state.members[1].role = DTUN_HA_VOTER;
+    state.members[1].enabled = 1;
+
+    if (dtun_ha_state_save(state_path, &state) < 0) goto out;
+
+    /* Set last_seen to 5 seconds ago (exceeding failover_timeout = 3) */
+    last_seen = time(NULL) - 5;
+    int step = dtund_ha_standby_step(&config, &last_seen);
+    if (step != 1) goto out;
+
+    if (dtun_ha_state_load(state_path, &loaded) < 0 ||
+        strcmp(loaded.leader_id, "hub-primary") != 0)
+        goto out;
+
+    result = 0;
+out:
+    unlink(state_path);
+    unlink(hub_state_path);
+    unlink(key_path);
+    rmdir(dir);
+    dtun_config_free(&config);
+    return result;
+}
+
 int main(void)
 {
     dtun_config_t config;
@@ -113,6 +185,7 @@ int main(void)
     dtun_config_init(&config);
     STATE_CHECK(config_syslog_test() == 0);
     STATE_CHECK(config_pool_default_test() == 0);
+    STATE_CHECK(standby_step_failover_test() == 0);
     STATE_CHECK(config.peer_timeout == 60);
     STATE_CHECK(config.identity_retention == 86400);
     STATE_CHECK(config.probe_interval_ms == 1000);
