@@ -22,7 +22,6 @@ override_dh_auto_install:
 	cp -f build/dtund debian/dtun/usr/bin/
 	cp -f build/dtunctl debian/dtun/usr/bin/
 	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun-example.conf
-	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun.conf
 	cp -f debian/dtund.service debian/dtun/lib/systemd/system/dtund.service
 	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/dkms.conf.in > $(DTUN_DKMS_DIR)/dkms.conf
 	cp -f Kbuild $(DTUN_DKMS_DIR)/
@@ -41,7 +40,9 @@ override_dh_installdeb:
 	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/postinst.in > debian/dtun/DEBIAN/postinst
 	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/prerm.in > debian/dtun/DEBIAN/prerm
 	cp -f debian/postrm debian/dtun/DEBIAN/postrm
+	cp -f debian/conffiles debian/dtun/DEBIAN/conffiles
 	chmod 0755 debian/dtun/DEBIAN/postinst debian/dtun/DEBIAN/prerm debian/dtun/DEBIAN/postrm
+	chmod 0644 debian/dtun/DEBIAN/conffiles
 	chmod -R a+rX debian/dtun
 
 override_dh_gencontrol:
