@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/types.h>
 #include <time.h>
 
 #define DTUN_HA_MAX_MEMBERS 16
