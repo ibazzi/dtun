@@ -20,7 +20,8 @@ typedef struct {
     /* Hub-specific settings */
     char *bind_address;     /* default "0.0.0.0" */
     int bind_port;          /* default 49001 */
-    char *pool;             /* e.g., "10.99.0.0/24" */
+    char *pool;             /* derived from address when omitted */
+    int pool_configured;    /* 1 when pool was explicitly configured */
     char *state_file;       /* default "/var/lib/dtun/hub.state" */
     int cookie_seconds;     /* default 30 */
     int peer_timeout;       /* registration lease timeout, default 60 */

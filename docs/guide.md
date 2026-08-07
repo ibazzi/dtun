@@ -86,7 +86,7 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | --- | --- | --- |
 | `bind_address` | `0.0.0.0` | 注册控制 socket 的监听地址 |
 | `bind_port` | `49001` | 注册控制 UDP 端口 |
-| `pool` | `10.99.0.0/24` | Spoke 内层地址池，当前只接受 `/0` 至 `/30` |
+| `pool` | 从 Hub `address` 的网络前缀推导 | Spoke 内层地址池，当前只接受 `/0` 至 `/30`；显式配置时以 `pool` 为准 |
 | `state_file` | `/var/lib/dtun/hub.state` | 带版本的二进制持久化状态 |
 | `cookie_seconds` | `30` | cookie 时间桶秒数；非正数回退为 30 |
 | `peer_timeout` | `60` | 最后一次成功注册后保留 Spoke 的秒数；非正数回退为 60 |

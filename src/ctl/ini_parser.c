@@ -1,8 +1,10 @@
 #include "ini_parser.h"
 #include "dtun_ha_defaults.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -39,6 +41,7 @@ void dtun_config_init(dtun_config_t *config) {
     config->bind_address = strdup_safe("0.0.0.0");
     config->bind_port = 49001;
     config->pool = strdup_safe("10.99.0.0/24");
+    config->pool_configured = 0;
     config->state_file = strdup_safe("/var/lib/dtun/hub.state");
     config->cookie_seconds = 30;
     config->peer_timeout = 60;
@@ -123,7 +126,11 @@ static void apply_value(dtun_config_t *c, const char *section,
     STRING_VALUE("psk", psk_hex)
     STRING_VALUE("bind_address", bind_address)
     INT_VALUE("bind_port", bind_port)
-    STRING_VALUE("pool", pool)
+    if (!strcmp(key, "pool")) {
+        replace_string(&c->pool, val);
+        c->pool_configured = 1;
+        return;
+    }
     STRING_VALUE("state_file", state_file)
     INT_VALUE("cookie_seconds", cookie_seconds)
     INT_VALUE("peer_timeout", peer_timeout)
@@ -203,6 +210,42 @@ static int parse_file(dtun_config_t *config, const char *filepath)
     return 0;
 }
 
+static void derive_pool_from_address(dtun_config_t *config)
+{
+    char address[64];
+    char *slash;
+    char *end = NULL;
+    char pool[INET_ADDRSTRLEN + 4];
+    struct in_addr inner;
+    size_t pool_length;
+    unsigned long prefix;
+    uint32_t mask;
+    uint32_t network;
+
+    if (config->pool_configured || !config->address ||
+        strlen(config->address) >= sizeof(address))
+        return;
+    strcpy(address, config->address);
+    slash = strchr(address, '/');
+    if (!slash || slash == address) return;
+    *slash++ = '\0';
+    errno = 0;
+    prefix = strtoul(slash, &end, 10);
+    if (errno || !*slash || !end || *end || prefix > 32 ||
+        inet_pton(AF_INET, address, &inner) != 1)
+        return;
+
+    mask = prefix ? UINT32_MAX << (32 - prefix) : 0;
+    network = ntohl(inner.s_addr) & mask;
+    inner.s_addr = htonl(network);
+    if (!inet_ntop(AF_INET, &inner, pool, INET_ADDRSTRLEN)) return;
+    pool_length = strlen(pool);
+    if (snprintf(pool + pool_length, sizeof(pool) - pool_length,
+                 "/%lu", prefix) >= (int)(sizeof(pool) - pool_length))
+        return;
+    replace_string(&config->pool, pool);
+}
+
 int dtun_config_load(dtun_config_t *config, const char *filepath)
 {
     char *overlay = NULL;
@@ -225,11 +268,14 @@ int dtun_config_load(dtun_config_t *config, const char *filepath)
         }
     }
     free(overlay);
+    derive_pool_from_address(config);
     return 0;
 }
 
 int dtun_config_load_base(dtun_config_t *config, const char *filepath)
 {
     dtun_config_init(config);
-    return parse_file(config, filepath);
+    if (parse_file(config, filepath) < 0) return -1;
+    derive_pool_from_address(config);
+    return 0;
 }

@@ -11,6 +11,43 @@
     } \
 } while (0)
 
+static int config_pool_default_test(void)
+{
+    dtun_config_t config;
+    char path[] = "/tmp/dtun-config-test-XXXXXX";
+    FILE *file = NULL;
+    int fd = -1;
+    int result = -1;
+
+    memset(&config, 0, sizeof(config));
+    fd = mkstemp(path);
+    if (fd < 0) goto out;
+    file = fdopen(fd, "w");
+    if (!file) goto out;
+    fd = -1;
+    if (fputs("[global]\naddress = 10.123.45.6/20\n[hub]\n",
+              file) == EOF) {
+        fclose(file);
+        file = NULL;
+        goto out;
+    }
+    if (fclose(file) != 0) {
+        file = NULL;
+        goto out;
+    }
+    file = NULL;
+    if (dtun_config_load_base(&config, path) < 0 ||
+        !config.pool || strcmp(config.pool, "10.123.32.0/20"))
+        goto out;
+    result = 0;
+out:
+    if (file) fclose(file);
+    if (fd >= 0) close(fd);
+    unlink(path);
+    dtun_config_free(&config);
+    return result;
+}
+
 int main(void)
 {
     dtun_config_t config;
@@ -25,6 +62,7 @@ int main(void)
     int result = 0;
 
     dtun_config_init(&config);
+    STATE_CHECK(config_pool_default_test() == 0);
     STATE_CHECK(config.peer_timeout == 60);
     STATE_CHECK(config.identity_retention == 86400);
     STATE_CHECK(config.probe_interval_ms == 1000);

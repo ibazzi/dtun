@@ -97,7 +97,7 @@ name; the section assignments below are conventions for supported configs.
 | --- | --- | --- |
 | `bind_address` | `0.0.0.0` | Registration-control socket listen address |
 | `bind_port` | `49001` | Registration-control UDP port |
-| `pool` | `10.99.0.0/24` | Spoke inner-address pool; `/0` through `/30` are accepted |
+| `pool` | Derived from the Hub `address` network prefix | Spoke inner-address pool; `/0` through `/30` are accepted, and an explicit `pool` takes precedence |
 | `state_file` | `/var/lib/dtun/hub.state` | Versioned binary persistent state |
 | `cookie_seconds` | `30` | Cookie time-bucket duration; nonpositive values fall back to 30 |
 | `peer_timeout` | `60` | Seconds to retain a Spoke after its last successful registration; nonpositive values fall back to 60 |
