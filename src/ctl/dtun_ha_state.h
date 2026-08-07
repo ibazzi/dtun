@@ -19,45 +19,45 @@
 enum dtun_ha_role { DTUN_HA_LEARNER = 0, DTUN_HA_VOTER = 1 };
 
 typedef struct {
-    char hub_id[DTUN_HA_ID_LEN];
-    uint8_t public_key[DTUN_HA_PUBLIC_KEY_LEN];
-    struct in_addr address;
-    uint16_t ha_port;
-    uint16_t control_port;
-    uint16_t data_port;
-    uint16_t weight;
-    uint8_t role;
-    uint8_t enabled;
-    uint64_t endpoint_generation;
-    uint64_t match_index;
+  char hub_id[DTUN_HA_ID_LEN];
+  uint8_t public_key[DTUN_HA_PUBLIC_KEY_LEN];
+  struct in_addr address;
+  uint16_t ha_port;
+  uint16_t control_port;
+  uint16_t data_port;
+  uint16_t weight;
+  uint8_t role;
+  uint8_t enabled;
+  uint64_t endpoint_generation;
+  uint64_t match_index;
 } dtun_ha_member_t;
 
 typedef struct {
-    uint8_t id[16];
-    uint8_t secret_hash[32];
-    char hub_id[DTUN_HA_ID_LEN];
-    uint16_t weight;
-    time_t expires_at;
-    uint8_t status; /* 0 unused, 1 claimed, 2 revoked */
-    uint8_t claimed_key[DTUN_HA_PUBLIC_KEY_LEN];
+  uint8_t id[16];
+  uint8_t secret_hash[32];
+  char hub_id[DTUN_HA_ID_LEN];
+  uint16_t weight;
+  time_t expires_at;
+  uint8_t status; /* 0 unused, 1 claimed, 2 revoked */
+  uint8_t claimed_key[DTUN_HA_PUBLIC_KEY_LEN];
 } dtun_ha_invite_t;
 
 typedef struct {
-    uint8_t cluster_id[DTUN_HA_CLUSTER_ID_LEN];
-    char local_hub_id[DTUN_HA_ID_LEN];
-    char leader_id[DTUN_HA_ID_LEN];
-    uint64_t term;
-    uint64_t commit_index;
-    uint32_t manifest_version;
-    uint32_t member_count;
-    uint32_t invite_count;
-    uint32_t failback_level;
-    uint64_t voted_term;
-    char voted_for[DTUN_HA_ID_LEN];
-    uint8_t failback_requested;
-    uint8_t failback_force;
-    dtun_ha_member_t members[DTUN_HA_MAX_MEMBERS];
-    dtun_ha_invite_t invites[DTUN_HA_MAX_INVITES];
+  uint8_t cluster_id[DTUN_HA_CLUSTER_ID_LEN];
+  char local_hub_id[DTUN_HA_ID_LEN];
+  char leader_id[DTUN_HA_ID_LEN];
+  uint64_t term;
+  uint64_t commit_index;
+  uint32_t manifest_version;
+  uint32_t member_count;
+  uint32_t invite_count;
+  uint32_t failback_level;
+  uint64_t voted_term;
+  char voted_for[DTUN_HA_ID_LEN];
+  uint8_t failback_requested;
+  uint8_t failback_force;
+  dtun_ha_member_t members[DTUN_HA_MAX_MEMBERS];
+  dtun_ha_invite_t invites[DTUN_HA_MAX_INVITES];
 } dtun_ha_state_t;
 
 int dtun_ha_validate_hub_id(const char *hub_id);
@@ -79,8 +79,7 @@ int dtun_ha_invite_encode(const dtun_ha_state_t *state,
                           const dtun_ha_invite_t *invite,
                           const uint8_t secret[DTUN_HA_SECRET_LEN],
                           struct in_addr leader_addr, uint16_t leader_port,
-                          const char *private_key_path,
-                          char **encoded);
+                          const char *private_key_path, char **encoded);
 int dtun_ha_invite_decode(const char *encoded, dtun_ha_invite_t *invite,
                           uint8_t secret[DTUN_HA_SECRET_LEN],
                           uint8_t cluster_id[DTUN_HA_CLUSTER_ID_LEN],

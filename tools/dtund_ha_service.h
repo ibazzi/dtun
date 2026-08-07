@@ -2,8 +2,8 @@
 #define DTUND_HA_SERVICE_H
 
 #include "ini_parser.h"
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <time.h>
 

@@ -16,155 +16,155 @@
 #include <linux/workqueue.h>
 #include <net/genetlink.h>
 
-#define DTUN_NAME               "dtun"
-#define DTUN_GENL_VERSION       1
-#define DTUN_IPPROTO            253
-#define DTUN_VERSION            1
-#define DTUN_TAG_LEN            16
-#define DTUN_KEY_LEN            32
-#define DTUN_PROBE_INTERVAL_MS  1000U
-#define DTUN_PATH_TIMEOUT_MS    3000U
+#define DTUN_NAME "dtun"
+#define DTUN_GENL_VERSION 1
+#define DTUN_IPPROTO 253
+#define DTUN_VERSION 1
+#define DTUN_TAG_LEN 16
+#define DTUN_KEY_LEN 32
+#define DTUN_PROBE_INTERVAL_MS 1000U
+#define DTUN_PATH_TIMEOUT_MS 3000U
 
 enum dtun_frame_type {
-	DTUN_FRAME_DATA = 1,
-	DTUN_FRAME_PROBE = 2,
-	DTUN_FRAME_KEEPALIVE = 3,
+  DTUN_FRAME_DATA = 1,
+  DTUN_FRAME_PROBE = 2,
+  DTUN_FRAME_KEEPALIVE = 3,
 };
 
 enum dtun_transport {
-	DTUN_TRANSPORT_RAW = 1,
-	DTUN_TRANSPORT_UDP = 2,
-	DTUN_TRANSPORT_RELAY = 3,
+  DTUN_TRANSPORT_RAW = 1,
+  DTUN_TRANSPORT_UDP = 2,
+  DTUN_TRANSPORT_RELAY = 3,
 };
 
 enum dtun_selected_path {
-	DTUN_PATH_DOWN = 0,
-	DTUN_PATH_RAW = 1,
-	DTUN_PATH_UDP = 2,
-	DTUN_PATH_HUB = 3,
+  DTUN_PATH_DOWN = 0,
+  DTUN_PATH_RAW = 1,
+  DTUN_PATH_UDP = 2,
+  DTUN_PATH_HUB = 3,
 };
 
 /* The tag authenticates all preceding header bytes plus the inner packet. */
 struct dtun_hdr {
-	u8 version;
-	u8 type;
-	__be16 flags;
-	__be32 src_tunnel_id;
-	__be32 dst_tunnel_id;
-	__be64 seq;
-	__be64 src_node;
-	__be64 dst_node;
-	u8 tag[DTUN_TAG_LEN];
+  u8 version;
+  u8 type;
+  __be16 flags;
+  __be32 src_tunnel_id;
+  __be32 dst_tunnel_id;
+  __be64 seq;
+  __be64 src_node;
+  __be64 dst_node;
+  u8 tag[DTUN_TAG_LEN];
 } __packed;
 
 struct dtun_prefix {
-	struct list_head list;
-	__be32 addr;
-	u8 len;
+  struct list_head list;
+  __be32 addr;
+  u8 len;
 };
 
 #define DTUN_REPLAY_BITMAP_LENS 32
 #define DTUN_REPLAY_WINDOW (DTUN_REPLAY_BITMAP_LENS * 64)
 
 struct dtun_peer {
-	struct list_head list;
-	struct dtun_dev *tdev;
-	refcount_t refs;
-	/* local ID selects this peer on receive; remote ID is written on send. */
-	u32 tunnel_id;
-	u32 remote_tunnel_id;
-	u64 node_id;
-	__be32 raw_addr;
-	__be32 raw_validated_addr;
-	__be32 udp_addr;
-	__be16 udp_port;
-	__be32 direct_udp_addr;
-	__be16 direct_udp_port;
-	u64 candidate_generation;
-	bool dynamic_raw;
-	unsigned long raw_seen;
-	unsigned long udp_seen;
-	atomic64_t tx_seq;
-	u64 rx_highest;
-	u64 rx_window[DTUN_REPLAY_BITMAP_LENS];
-	spinlock_t state_lock;
-	u8 key[DTUN_KEY_LEN];
-	struct crypto_shash *hmac;
-	struct list_head prefixes;
+  struct list_head list;
+  struct dtun_dev *tdev;
+  refcount_t refs;
+  /* local ID selects this peer on receive; remote ID is written on send. */
+  u32 tunnel_id;
+  u32 remote_tunnel_id;
+  u64 node_id;
+  __be32 raw_addr;
+  __be32 raw_validated_addr;
+  __be32 udp_addr;
+  __be16 udp_port;
+  __be32 direct_udp_addr;
+  __be16 direct_udp_port;
+  u64 candidate_generation;
+  bool dynamic_raw;
+  unsigned long raw_seen;
+  unsigned long udp_seen;
+  atomic64_t tx_seq;
+  u64 rx_highest;
+  u64 rx_window[DTUN_REPLAY_BITMAP_LENS];
+  spinlock_t state_lock;
+  u8 key[DTUN_KEY_LEN];
+  struct crypto_shash *hmac;
+  struct list_head prefixes;
 };
 
 struct dtun_dev {
-	struct net_device *dev;
-	__be32 local_addr;
-	__be32 hub_addr;
-	__be16 udp_port;
-	__be16 hub_port;
-	spinlock_t hub_lock;
-	u64 node_id;
-	struct socket *udp_sock;
-	u32 probe_interval_ms;
-	u32 path_timeout_ms;
-	spinlock_t peer_lock;
-	struct list_head peers;
-	struct delayed_work probe_work;
-	struct list_head global_list;
+  struct net_device *dev;
+  __be32 local_addr;
+  __be32 hub_addr;
+  __be16 udp_port;
+  __be16 hub_port;
+  spinlock_t hub_lock;
+  u64 node_id;
+  struct socket *udp_sock;
+  u32 probe_interval_ms;
+  u32 path_timeout_ms;
+  spinlock_t peer_lock;
+  struct list_head peers;
+  struct delayed_work probe_work;
+  struct list_head global_list;
 };
 
 enum dtun_nl_cmd {
-	DTUN_CMD_UNSPEC,
-	DTUN_CMD_PEER_ADD,
-	DTUN_CMD_PEER_DEL,
-	DTUN_CMD_PEER_SET,
-	DTUN_CMD_ROUTE_ADD,
-	DTUN_CMD_ROUTE_DEL,
-	DTUN_CMD_PEER_GET,
-	DTUN_CMD_STATS_GET,
-	DTUN_CMD_PEER_LIST,
-	DTUN_CMD_REBIND,
-	DTUN_CMD_HUB_SET,
-	__DTUN_CMD_MAX,
+  DTUN_CMD_UNSPEC,
+  DTUN_CMD_PEER_ADD,
+  DTUN_CMD_PEER_DEL,
+  DTUN_CMD_PEER_SET,
+  DTUN_CMD_ROUTE_ADD,
+  DTUN_CMD_ROUTE_DEL,
+  DTUN_CMD_PEER_GET,
+  DTUN_CMD_STATS_GET,
+  DTUN_CMD_PEER_LIST,
+  DTUN_CMD_REBIND,
+  DTUN_CMD_HUB_SET,
+  __DTUN_CMD_MAX,
 };
 #define DTUN_CMD_MAX (__DTUN_CMD_MAX - 1)
 
 enum dtun_nl_attr {
-	DTUN_A_UNSPEC,
-	DTUN_A_IFINDEX,
-	DTUN_A_TUNNEL_ID,
-	DTUN_A_NODE_ID,
-	DTUN_A_RAW_ADDR,
-	DTUN_A_UDP_ADDR,
-	DTUN_A_UDP_PORT,
-	DTUN_A_KEY,
-	DTUN_A_PREFIX,
-	DTUN_A_PREFIX_LEN,
-	DTUN_A_PATH,
-	DTUN_A_RAW_UP,
-	DTUN_A_UDP_UP,
-	DTUN_A_REMOTE_TUNNEL_ID,
-	DTUN_A_DYNAMIC_RAW,
-	DTUN_A_CANDIDATE_GENERATION,
-	DTUN_A_RENDEZVOUS_UDP_ADDR,
-	DTUN_A_RENDEZVOUS_UDP_PORT,
-	DTUN_A_DIRECT_UDP_ADDR,
-	DTUN_A_DIRECT_UDP_PORT,
-	DTUN_A_RAW_VALIDATED_ADDR,
-	DTUN_A_SELECTED_PATH,
-	DTUN_A_HUB_ADDR,
-	DTUN_A_HUB_PORT,
-	__DTUN_A_MAX,
+  DTUN_A_UNSPEC,
+  DTUN_A_IFINDEX,
+  DTUN_A_TUNNEL_ID,
+  DTUN_A_NODE_ID,
+  DTUN_A_RAW_ADDR,
+  DTUN_A_UDP_ADDR,
+  DTUN_A_UDP_PORT,
+  DTUN_A_KEY,
+  DTUN_A_PREFIX,
+  DTUN_A_PREFIX_LEN,
+  DTUN_A_PATH,
+  DTUN_A_RAW_UP,
+  DTUN_A_UDP_UP,
+  DTUN_A_REMOTE_TUNNEL_ID,
+  DTUN_A_DYNAMIC_RAW,
+  DTUN_A_CANDIDATE_GENERATION,
+  DTUN_A_RENDEZVOUS_UDP_ADDR,
+  DTUN_A_RENDEZVOUS_UDP_PORT,
+  DTUN_A_DIRECT_UDP_ADDR,
+  DTUN_A_DIRECT_UDP_PORT,
+  DTUN_A_RAW_VALIDATED_ADDR,
+  DTUN_A_SELECTED_PATH,
+  DTUN_A_HUB_ADDR,
+  DTUN_A_HUB_PORT,
+  __DTUN_A_MAX,
 };
 #define DTUN_A_MAX (__DTUN_A_MAX - 1)
 
 enum dtun_link_attr {
-	IFLA_DTUN_UNSPEC,
-	IFLA_DTUN_LOCAL,
-	IFLA_DTUN_UDP_PORT,
-	IFLA_DTUN_NODE_ID,
-	IFLA_DTUN_HUB,
-	IFLA_DTUN_HUB_PORT,
-	IFLA_DTUN_PROBE_INTERVAL_MS,
-	IFLA_DTUN_PATH_TIMEOUT_MS,
-	__IFLA_DTUN_MAX,
+  IFLA_DTUN_UNSPEC,
+  IFLA_DTUN_LOCAL,
+  IFLA_DTUN_UDP_PORT,
+  IFLA_DTUN_NODE_ID,
+  IFLA_DTUN_HUB,
+  IFLA_DTUN_HUB_PORT,
+  IFLA_DTUN_PROBE_INTERVAL_MS,
+  IFLA_DTUN_PATH_TIMEOUT_MS,
+  __IFLA_DTUN_MAX,
 };
 #define IFLA_DTUN_MAX (__IFLA_DTUN_MAX - 1)
 
@@ -182,6 +182,7 @@ int dtun_del_prefix(struct dtun_peer *peer, __be32 addr, u8 len);
 int dtun_genl_register(void);
 void dtun_genl_unregister(void);
 void dtun_genl_observed_peer(struct dtun_dev *d, struct dtun_peer *peer,
-			     __be32 addr, __be16 port, enum dtun_transport transport);
+                             __be32 addr, __be16 port,
+                             enum dtun_transport transport);
 
 #endif

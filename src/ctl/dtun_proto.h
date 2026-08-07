@@ -1,9 +1,9 @@
 #ifndef DTUN_PROTO_H
 #define DTUN_PROTO_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <netinet/in.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define DTRG_MAGIC "DTRG"
 #define DTRG_INIT 1
@@ -36,81 +36,90 @@
 #define DTRG_HUB_ACTIVE 0x01
 
 typedef struct {
-    char hub_id[DTRG_HUB_ID_LEN];
-    struct in_addr address;
-    uint16_t control_port;
-    uint16_t data_port;
-    uint16_t weight;
-    uint8_t public_key[32];
-    uint8_t flags;
+  char hub_id[DTRG_HUB_ID_LEN];
+  struct in_addr address;
+  uint16_t control_port;
+  uint16_t data_port;
+  uint16_t weight;
+  uint8_t public_key[32];
+  uint8_t flags;
 } dtrg_hub_t;
 
 typedef struct {
-    uint64_t node_id;
-    uint32_t tunnel_id;
-    uint32_t remote_tunnel_id;
-    struct in_addr address;
-    struct in_addr raw;
-    struct in_addr udp_addr;
-    uint16_t udp_port;
-    uint64_t generation;
-    uint8_t flags;
+  uint64_t node_id;
+  uint32_t tunnel_id;
+  uint32_t remote_tunnel_id;
+  struct in_addr address;
+  struct in_addr raw;
+  struct in_addr udp_addr;
+  uint16_t udp_port;
+  uint64_t generation;
+  uint8_t flags;
 } dtrg_sync_peer_t;
 
 typedef struct {
-    uint8_t kind;
-    uint64_t node_id;
-    struct in_addr address;
-    uint8_t prefix_len;
-    struct in_addr raw;
-    uint8_t nonce[DTRG_NONCE_LEN];
-    uint8_t cookie[DTRG_COOKIE_LEN];
-    uint8_t lease_token[DTRG_LEASE_TOKEN_LEN];
-    uint32_t tunnel_id;
-    uint32_t remote_tunnel_id;
-    uint16_t data_port;     /* Hub's actual data plane UDP port */
-    uint64_t epoch;
-    uint64_t counter;
-    uint16_t offset;
-    uint8_t flags;
-    struct in_addr observed_addr;
-    uint16_t observed_port;
-    dtrg_sync_peer_t *peers; /* Allocated SYNC peer array */
-    uint16_t peer_count;
-    uint8_t cluster_id[16];
-    uint64_t term;
-    uint8_t ha_mode;
-    uint16_t failover_timeout;
-    dtrg_hub_t *hubs;
-    uint8_t hub_count;
+  uint8_t kind;
+  uint64_t node_id;
+  struct in_addr address;
+  uint8_t prefix_len;
+  struct in_addr raw;
+  uint8_t nonce[DTRG_NONCE_LEN];
+  uint8_t cookie[DTRG_COOKIE_LEN];
+  uint8_t lease_token[DTRG_LEASE_TOKEN_LEN];
+  uint32_t tunnel_id;
+  uint32_t remote_tunnel_id;
+  uint16_t data_port; /* Hub's actual data plane UDP port */
+  uint64_t epoch;
+  uint64_t counter;
+  uint16_t offset;
+  uint8_t flags;
+  struct in_addr observed_addr;
+  uint16_t observed_port;
+  dtrg_sync_peer_t *peers; /* Allocated SYNC peer array */
+  uint16_t peer_count;
+  uint8_t cluster_id[16];
+  uint64_t term;
+  uint8_t ha_mode;
+  uint16_t failover_timeout;
+  dtrg_hub_t *hubs;
+  uint8_t hub_count;
 } dtrg_msg_t;
 
 /* Compute HMAC-SHA256 truncated to 16 bytes */
-void dtrg_hmac(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t *out_tag);
+void dtrg_hmac(const uint8_t *key, size_t key_len, const uint8_t *data,
+               size_t data_len, uint8_t *out_tag);
 
 /* Pack functions return total byte length written, or < 0 on error. */
-ssize_t dtrg_pack_init(const uint8_t *key, uint64_t node_id, struct in_addr address, uint8_t prefix_len,
-                       struct in_addr raw, const uint8_t *nonce, uint8_t *out, size_t max_len);
+ssize_t dtrg_pack_init(const uint8_t *key, uint64_t node_id,
+                       struct in_addr address, uint8_t prefix_len,
+                       struct in_addr raw, const uint8_t *nonce, uint8_t *out,
+                       size_t max_len);
 
-ssize_t dtrg_pack_challenge(const uint8_t *key, uint64_t node_id, struct in_addr address, uint8_t prefix_len,
-                            struct in_addr raw, const uint8_t *nonce, const uint8_t *cookie, uint8_t *out, size_t max_len);
+ssize_t dtrg_pack_challenge(const uint8_t *key, uint64_t node_id,
+                            struct in_addr address, uint8_t prefix_len,
+                            struct in_addr raw, const uint8_t *nonce,
+                            const uint8_t *cookie, uint8_t *out,
+                            size_t max_len);
 
-ssize_t dtrg_pack_confirm(const uint8_t *key, uint64_t node_id, struct in_addr address, uint8_t prefix_len,
-                          struct in_addr raw, const uint8_t *nonce, const uint8_t *cookie, uint8_t *out, size_t max_len);
+ssize_t dtrg_pack_confirm(const uint8_t *key, uint64_t node_id,
+                          struct in_addr address, uint8_t prefix_len,
+                          struct in_addr raw, const uint8_t *nonce,
+                          const uint8_t *cookie, uint8_t *out, size_t max_len);
 
-ssize_t dtrg_pack_ack(const uint8_t *key, uint64_t node_id, uint32_t tunnel_id, uint32_t remote_tunnel_id,
-                      struct in_addr address, uint8_t prefix_len, uint16_t data_port, const uint8_t *nonce,
-                      const uint8_t *lease_token, uint64_t epoch,
-                      uint8_t *out, size_t max_len);
+ssize_t dtrg_pack_ack(const uint8_t *key, uint64_t node_id, uint32_t tunnel_id,
+                      uint32_t remote_tunnel_id, struct in_addr address,
+                      uint8_t prefix_len, uint16_t data_port,
+                      const uint8_t *nonce, const uint8_t *lease_token,
+                      uint64_t epoch, uint8_t *out, size_t max_len);
 
-ssize_t dtrg_pack_sync(const uint8_t *key, uint64_t node_id, const uint8_t *nonce,
-                       const dtrg_sync_peer_t *peers, uint16_t peer_count,
-                       uint8_t *out, size_t max_len);
+ssize_t dtrg_pack_sync(const uint8_t *key, uint64_t node_id,
+                       const uint8_t *nonce, const dtrg_sync_peer_t *peers,
+                       uint16_t peer_count, uint8_t *out, size_t max_len);
 
 ssize_t dtrg_pack_refresh(const uint8_t *key, uint64_t node_id,
                           const uint8_t *lease_token, uint64_t counter,
-                          uint64_t epoch, uint16_t offset,
-                          uint8_t *out, size_t max_len);
+                          uint64_t epoch, uint16_t offset, uint8_t *out,
+                          size_t max_len);
 
 ssize_t dtrg_pack_refresh_ack(const uint8_t *key, uint64_t node_id,
                               const uint8_t *lease_token, uint64_t counter,
@@ -118,8 +127,8 @@ ssize_t dtrg_pack_refresh_ack(const uint8_t *key, uint64_t node_id,
                               uint16_t observed_port, uint8_t flags,
                               uint16_t next_offset,
                               const dtrg_sync_peer_t *peers,
-                              uint16_t peer_count,
-                              uint8_t *out, size_t max_len);
+                              uint16_t peer_count, uint8_t *out,
+                              size_t max_len);
 
 ssize_t dtrg_pack_hub_list(const uint8_t *key, uint64_t node_id,
                            const uint8_t cluster_id[16], uint64_t term,
@@ -128,7 +137,8 @@ ssize_t dtrg_pack_hub_list(const uint8_t *key, uint64_t node_id,
                            uint8_t *out, size_t max_len);
 
 /* Parse and authenticate an incoming packet. Returns 0 on success. */
-int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len, dtrg_msg_t *msg);
+int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len,
+               dtrg_msg_t *msg);
 
 void dtrg_msg_free(dtrg_msg_t *msg);
 
