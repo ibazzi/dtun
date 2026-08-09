@@ -149,9 +149,9 @@ tar --exclude=.git --exclude=build --exclude='*.ko' -czf "$RUN/src.tar.gz" -C "$
 rsync -a --exclude=.git --exclude=build -e "ssh -o ControlPath=${SOCKETS[0]}" "$ROOT/" "${HOSTS[0]}:/tmp/dtun-ha-real-src/"
 for i in 1 2; do
     scp -o ControlPath="${SOCKETS[$i]}" "$RUN/src.tar.gz" "${HOSTS[$i]}:/tmp/dtun-ha-real-src.tar.gz"
-    remote "$i" "rm -rf /tmp/dtun-ha-real-src; mkdir -p /tmp/dtun-ha-real-src; tar -xzf /tmp/dtun-ha-real-src.tar.gz -C /tmp/dtun-ha-real-src; make -C /tmp/dtun-ha-real-src -j4 all modules"
+    remote "$i" "rm -rf /tmp/dtun-ha-real-src; mkdir -p /tmp/dtun-ha-real-src; tar -xzf /tmp/dtun-ha-real-src.tar.gz -C /tmp/dtun-ha-real-src; make -C /tmp/dtun-ha-real-src -j4 all module"
 done
-remote 0 "make -C /tmp/dtun-ha-real-src -j4 all modules"
+remote 0 "make -C /tmp/dtun-ha-real-src -j4 all module"
 make -C "$ROOT" -j4 all
 
 render_config "$CONFIG/spoke-local.conf.in" "$RUN/spoke-local.conf"

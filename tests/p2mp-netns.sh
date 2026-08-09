@@ -50,7 +50,7 @@ trap cleanup EXIT INT TERM
 cleanup
 mkdir -p "$OUT"
 if ! lsmod | grep -q '^dtun '; then
-	modprobe dtun 2>/dev/null || insmod "$ROOT/build/dtun.ko" 2>/dev/null || insmod "$ROOT/dtun.ko"
+	modprobe dtun 2>/dev/null || insmod "$ROOT/build/dtun.ko"
 fi
 
 ip link add "$BR" type bridge

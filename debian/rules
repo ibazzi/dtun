@@ -18,14 +18,16 @@ override_dh_auto_install:
 	mkdir -p debian/dtun/usr/bin
 	mkdir -p debian/dtun/etc/dtun
 	mkdir -p debian/dtun/lib/systemd/system
-	mkdir -p $(DTUN_DKMS_DIR)/src
+	mkdir -p $(DTUN_DKMS_DIR)/module
+	mkdir -p $(DTUN_DKMS_DIR)/include/dtun
 	cp -f build/dtund debian/dtun/usr/bin/
 	cp -f build/dtunctl debian/dtun/usr/bin/
 	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun-example.conf
 	cp -f debian/dtund.service debian/dtun/lib/systemd/system/dtund.service
 	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/dkms.conf.in > $(DTUN_DKMS_DIR)/dkms.conf
-	cp -f Kbuild $(DTUN_DKMS_DIR)/
-	cp -f src/dtun.h src/dtun_main.c src/dtun_netlink.c $(DTUN_DKMS_DIR)/src/
+	cp -f module/Makefile module/Kbuild module/dtun.h module/dtun_main.c \
+		module/dtun_netlink.c $(DTUN_DKMS_DIR)/module/
+	cp -f include/dtun/uapi.h $(DTUN_DKMS_DIR)/include/dtun/
 
 override_dh_fixperms:
 	chmod -R a+rX debian/dtun

@@ -1,4 +1,4 @@
-#include "dtun_ha_proto.h"
+#include <dtun/ha_proto.h>
 
 #include <arpa/inet.h>
 #include <errno.h>

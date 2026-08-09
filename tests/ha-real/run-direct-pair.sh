@@ -122,8 +122,8 @@ section "Build and deploy"
 tar --exclude=.git --exclude=build --exclude='*.ko' -czf "$RUN/src.tar.gz" -C "$ROOT" .
 rsync -a --exclude=.git --exclude=build -e "ssh -o ControlPath=${SOCKETS[0]}" "$ROOT/" "${HOSTS[0]}:/tmp/dtun-ha-direct-src/"
 scp -o ControlPath="${SOCKETS[1]}" "$RUN/src.tar.gz" "${HOSTS[1]}:/tmp/dtun-ha-direct-src.tar.gz"
-remote 1 "rm -rf /tmp/dtun-ha-direct-src; mkdir -p /tmp/dtun-ha-direct-src; tar -xzf /tmp/dtun-ha-direct-src.tar.gz -C /tmp/dtun-ha-direct-src; make -C /tmp/dtun-ha-direct-src -j4 all modules"
-remote 0 "make -C /tmp/dtun-ha-direct-src -j4 all modules"
+remote 1 "rm -rf /tmp/dtun-ha-direct-src; mkdir -p /tmp/dtun-ha-direct-src; tar -xzf /tmp/dtun-ha-direct-src.tar.gz -C /tmp/dtun-ha-direct-src; make -C /tmp/dtun-ha-direct-src -j4 all module"
+remote 0 "make -C /tmp/dtun-ha-direct-src -j4 all module"
 make -C "$ROOT" -j4 all
 
 render "$CONFIG/hub-primary.conf" "$RUN/primary.conf"

@@ -7,8 +7,10 @@ dynamically linked x86-64 binary. Rebuild the extension for other architectures,
 incompatible C library environments, or independently audited toolchains.
 
 Copy `iplink_dtun.c` into the `ip/` directory of the iproute2 source tree, add
-`iplink_dtun.o` to its `IPOBJ` list, and rebuild using that iproute2 release's
-normal build process. The resulting command supports:
+`iplink_dtun.o` to its `IPOBJ` list, add this repository's `include/` directory
+to the compiler include path (for example, `-I/path/to/dtun/include`), and
+rebuild using that iproute2 release's normal build process. The source shares
+`include/dtun/uapi.h` with the kernel module. The resulting command supports:
 
 ```sh
 ip link add dtun0 type dtun local 192.0.2.10 udp_port 49000 node_id 1 \

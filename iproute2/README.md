@@ -6,7 +6,9 @@
 不兼容的 C library 环境或需要自行审计工具链时，应重新构建 iproute2 扩展。
 
 将 `iplink_dtun.c` 复制到 iproute2 源码树的 `ip/` 目录，把 `iplink_dtun.o` 加入
-其 `IPOBJ` 列表，然后按该版本 iproute2 的构建流程重新编译。完成后可执行：
+其 `IPOBJ` 列表，并将本仓库的 `include/` 加入编译器头文件搜索路径
+（例如 `-I/path/to/dtun/include`），然后按该版本 iproute2 的构建流程重新编译。
+`iplink_dtun.c` 与内核模块共用 `include/dtun/uapi.h`。完成后可执行：
 
 ```sh
 ip link add dtun0 type dtun local 192.0.2.10 udp_port 49000 node_id 1 \

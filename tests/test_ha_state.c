@@ -1,4 +1,4 @@
-#include "dtun_ha_state.h"
+#include <dtun/ha_state.h>
 
 #include <arpa/inet.h>
 #include <errno.h>

@@ -1,4 +1,4 @@
-#include "../tools/dtund_spoke_ha.h"
+#include "../src/dtund/spoke_ha.h"
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>

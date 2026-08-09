@@ -29,8 +29,11 @@ Hub 上启用 IPv4 forwarding，并允许相关 FORWARD 流量。
 
 ```sh
 make KDIR=/lib/modules/$(uname -r)/build
-sudo insmod ./dtun.ko
+sudo insmod ./build/dtun.ko
 ```
+
+如果只编译内核模块，可运行 `make -C module KDIR=/lib/modules/$(uname -r)/build`；
+输出仍为 `build/dtun.ko`。
 
 在 Debian/Ubuntu 上可使用 DKMS 安装包，避免把编译机内核版本绑定进安装包：
 

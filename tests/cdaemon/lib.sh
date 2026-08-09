@@ -37,7 +37,7 @@ summary() {
 
 mod_up() {
 	if ! lsmod | grep -q '^dtun '; then
-		insmod "$ROOT/build/dtun.ko" 2>/dev/null || insmod "$ROOT/dtun.ko"
+	insmod "$ROOT/build/dtun.ko"
 	fi
 }
 

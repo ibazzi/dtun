@@ -1,32 +1,49 @@
-.PHONY: all build modules ctools clean check test p2mp-test deb format check-format
+.PHONY: all build module ctools test-binaries clean check test p2mp-test deb \
+	format check-format compat-build
+
+ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+SRC_DIR := $(ROOT_DIR)/src
+MODULE_DIR := $(ROOT_DIR)/module
+BUILD_DIR ?= $(ROOT_DIR)/build
+BUILD_DIR := $(abspath $(BUILD_DIR))
 
 CLANG_FORMAT ?= $(shell command -v clang-format || command -v clang-format-18 || echo true)
-
 KDIR ?= /lib/modules/$(shell uname -r)/build
-IP ?= $(CURDIR)/bin/ip
+IP ?= $(ROOT_DIR)/bin/ip
 KDIRS ?= $(KDIR)
 SUDO ?= sudo
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2
-override CFLAGS += -Isrc/ctl
+CPPFLAGS ?=
 LDFLAGS ?=
-override LDFLAGS += -lcrypto
 
-BUILD_DIR = build
-CTL_OBJS = $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
-CTL_HEADERS = $(wildcard src/ctl/*.h)
-HA_TOOL_HEADERS = $(wildcard tools/dtund_ha*.h tools/dtund_spoke_ha.h tools/dtunctl_ha.h)
-SRC_FILES = $(shell find src tools tests iproute2 -type f \( -name "*.c" -o -name "*.h" \))
+# Artifacts from the pre-module/Makefile root-level Kbuild layout.
+LEGACY_KERNEL_ARTIFACTS := \
+	.dtun.ko.cmd .dtun.mod.cmd .dtun.mod.o.cmd .dtun.o.cmd \
+	.Module.symvers.cmd .modules.order.cmd .module-common.o \
+	..module-common.o.cmd \
+	dtun.ko dtun.mod dtun.mod.c dtun.mod.o dtun.o Module.symvers \
+	modules.order module-common.o
 
-all: modules ctools
+SRC_FILES = $(shell find include src module tests iproute2 -type f \( -name "*.c" -o -name "*.h" \))
+
+all: module ctools
+
+build: all
+
+ctools:
+	$(MAKE) -C $(SRC_DIR) BUILD_DIR=$(BUILD_DIR) CC="$(CC)" \
+		CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" \
+		LDFLAGS="$(LDFLAGS)" all
+
+test-binaries:
+	$(MAKE) -C $(SRC_DIR) BUILD_DIR=$(BUILD_DIR) CC="$(CC)" \
+		CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" \
+		LDFLAGS="$(LDFLAGS)" test-binaries
 
 format:
 	@if [ "$(CLANG_FORMAT)" != "true" ]; then \
 		$(CLANG_FORMAT) -i $(SRC_FILES); \
-		if [ -d "$(BUILD_DIR)" ]; then \
-			find $(BUILD_DIR) -type f \( -name "*.mod.c" -o -name "*.c" -o -name "*.h" \) -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
-		fi; \
-		find . -maxdepth 1 -type f -name "*.mod.c" -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
 	fi
 
 check-format:
@@ -34,76 +51,25 @@ check-format:
 		$(CLANG_FORMAT) --dry-run --Werror $(SRC_FILES); \
 	fi
 
-modules:
-	@mkdir -p $(BUILD_DIR)/src
-	@cp -f Kbuild $(BUILD_DIR)/Kbuild
-	@ln -snf $(CURDIR)/src/dtun_main.c $(BUILD_DIR)/src/dtun_main.c
-	@ln -snf $(CURDIR)/src/dtun_netlink.c $(BUILD_DIR)/src/dtun_netlink.c
-	@ln -snf $(CURDIR)/src/dtun.h $(BUILD_DIR)/src/dtun.h
-	$(MAKE) -C $(KDIR) M=$(CURDIR)/$(BUILD_DIR) modules
-	@if [ "$(CLANG_FORMAT)" != "true" ]; then \
-		find $(BUILD_DIR) -type f \( -name "*.mod.c" -o -name "*.c" -o -name "*.h" \) -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
-		find . -maxdepth 1 -type f -name "*.mod.c" -exec $(CLANG_FORMAT) -i {} + 2>/dev/null || true; \
-	fi
-
-ctools: $(BUILD_DIR)/dtund $(BUILD_DIR)/dtunctl
-
-$(BUILD_DIR)/ctl/%.o: src/ctl/%.c $(CTL_HEADERS)
-	@mkdir -p $(BUILD_DIR)/ctl
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/dtund: tools/dtund.c tools/dtund_ha_service.c tools/dtund_spoke_ha.c $(HA_TOOL_HEADERS) $(CTL_HEADERS) $(CTL_OBJS)
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) tools/dtund.c tools/dtund_ha_service.c tools/dtund_spoke_ha.c $(CTL_OBJS) $(LDFLAGS) -pthread -o $@
-
-$(BUILD_DIR)/dtunctl: tools/dtunctl.c tools/dtunctl_ha.c $(HA_TOOL_HEADERS) $(CTL_HEADERS) $(CTL_OBJS)
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) tools/dtunctl.c tools/dtunctl_ha.c $(CTL_OBJS) $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_proto: tests/test_proto.c $(BUILD_DIR)/ctl/dtun_proto.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_proto.o $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_daemon_state: tests/test_daemon_state.c tools/dtund.c tools/dtund_ha_service.c tools/dtund_spoke_ha.c $(CTL_OBJS)
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< tools/dtund_ha_service.c tools/dtund_spoke_ha.c $(CTL_OBJS) $(LDFLAGS) -pthread -o $@
-
-$(BUILD_DIR)/test_ha_state: tests/test_ha_state.c $(BUILD_DIR)/ctl/dtun_ha_state.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_ha_runtime: tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_ha_join: tests/test_ha_join.c $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_spoke_ha: tests/test_spoke_ha.c tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
-
-$(BUILD_DIR)/test_liveness: tests/test_liveness.c $(BUILD_DIR)/ctl/dtun_liveness.o
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_liveness.o -o $@
+module:
+	$(MAKE) -C $(MODULE_DIR) BUILD_DIR=$(BUILD_DIR) KDIR="$(KDIR)" module
 
 clean:
-	@if [ -d "$(BUILD_DIR)" ]; then \
-		$(MAKE) -C $(KDIR) M=$(CURDIR)/$(BUILD_DIR) clean 2>/dev/null || true; \
-	fi
+	$(MAKE) -C $(MODULE_DIR) BUILD_DIR=$(BUILD_DIR) KDIR="$(KDIR)" clean
+	$(MAKE) -C $(SRC_DIR) BUILD_DIR=$(BUILD_DIR) clean
+	rm -f $(LEGACY_KERNEL_ARTIFACTS)
 	rm -rf $(BUILD_DIR)
 
-check: check-format ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR)/test_ha_state $(BUILD_DIR)/test_ha_runtime $(BUILD_DIR)/test_ha_join $(BUILD_DIR)/test_spoke_ha $(BUILD_DIR)/test_liveness
-	./$(BUILD_DIR)/test_proto
-	./$(BUILD_DIR)/test_daemon_state
-	./$(BUILD_DIR)/test_ha_state
-	./$(BUILD_DIR)/test_ha_runtime
-	./$(BUILD_DIR)/test_ha_join
-	./$(BUILD_DIR)/test_spoke_ha
-	./$(BUILD_DIR)/test_liveness
-	CTL=./$(BUILD_DIR)/dtunctl sh tests/test_cli.sh
-	CTL=./$(BUILD_DIR)/dtunctl sh tests/test_ha_cli.sh
+check: check-format ctools test-binaries
+	$(BUILD_DIR)/test_proto
+	$(BUILD_DIR)/test_daemon_state
+	$(BUILD_DIR)/test_ha_state
+	$(BUILD_DIR)/test_ha_runtime
+	$(BUILD_DIR)/test_ha_join
+	$(BUILD_DIR)/test_spoke_ha
+	$(BUILD_DIR)/test_liveness
+	CTL=$(BUILD_DIR)/dtunctl sh tests/test_cli.sh
+	CTL=$(BUILD_DIR)/dtunctl sh tests/test_ha_cli.sh
 	sh -n tests/netns-smoke.sh tests/p2mp-netns.sh tests/cdaemon/lib.sh
 	bash -n tests/cdaemon/01-control-plane.sh tests/cdaemon/02-data-plane.sh \
 		tests/cdaemon/03-stability.sh tests/cdaemon/04-perf.sh \

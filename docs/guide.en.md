@@ -33,8 +33,11 @@ Build dependencies:
 
 ```sh
 make KDIR=/lib/modules/$(uname -r)/build
-sudo insmod ./dtun.ko
+sudo insmod ./build/dtun.ko
 ```
+
+To build only the kernel module, run `make -C module KDIR=/lib/modules/$(uname -r)/build`.
+The output remains `build/dtun.ko`.
 
 On Debian/Ubuntu, use the DKMS package to avoid binding the package to the
 kernel version of the build host:

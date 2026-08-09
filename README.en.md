@@ -60,8 +60,11 @@ and the OpenSSL libcrypto development package:
 
 ```sh
 make KDIR=/lib/modules/$(uname -r)/build
-sudo insmod ./dtun.ko
+sudo insmod ./build/dtun.ko
 ```
+
+To build only the kernel module, run `make -C module KDIR=/lib/modules/$(uname -r)/build`.
+The module is still written to `build/dtun.ko`.
 
 On Debian/Ubuntu, you can also build a DKMS package. The package does not ship
 a `dtun.ko` built on the packaging host; DKMS builds it for the target

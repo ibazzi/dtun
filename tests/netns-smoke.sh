@@ -28,12 +28,12 @@ send_frame() {
 trap cleanup EXIT INT TERM
 
 [ "$(id -u)" = 0 ] || fail "run as root"
-[ -e "$ROOT/build/dtun.ko" ] || [ -e "$ROOT/dtun.ko" ] || fail "build dtun.ko first"
+[ -e "$ROOT/build/dtun.ko" ] || fail "build dtun.ko first"
 command -v "$IP" >/dev/null 2>&1 || fail "IP command not found: $IP"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v ping >/dev/null 2>&1 || fail "ping is required"
 if ! lsmod | grep -q '^dtun '; then
-	modprobe dtun 2>/dev/null || insmod "$ROOT/build/dtun.ko" 2>/dev/null || insmod "$ROOT/dtun.ko"
+	modprobe dtun 2>/dev/null || insmod "$ROOT/build/dtun.ko"
 fi
 
 $IP netns add dtun-a

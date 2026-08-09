@@ -6,21 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <dtun/uapi.h>
+
 #include "ip_common.h"
 #include "utils.h"
-
-enum {
-  IFLA_DTUN_UNSPEC,
-  IFLA_DTUN_LOCAL,
-  IFLA_DTUN_UDP_PORT,
-  IFLA_DTUN_NODE_ID,
-  IFLA_DTUN_HUB,
-  IFLA_DTUN_HUB_PORT,
-  IFLA_DTUN_PROBE_INTERVAL_MS_RESERVED,
-  IFLA_DTUN_PATH_TIMEOUT_MS_RESERVED,
-  __IFLA_DTUN_MAX,
-};
-#define IFLA_DTUN_MAX (__IFLA_DTUN_MAX - 1)
 
 static void explain(void) {
   fprintf(stderr,

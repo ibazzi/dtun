@@ -48,8 +48,11 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 
 ```sh
 make KDIR=/lib/modules/$(uname -r)/build
-sudo insmod ./dtun.ko
+sudo insmod ./build/dtun.ko
 ```
+
+如只需编译内核模块，也可以直接执行 `make -C module KDIR=/lib/modules/$(uname -r)/build`；
+模块仍输出到 `build/dtun.ko`。
 
 在 Debian/Ubuntu 上也可以构建 DKMS 安装包。安装包不携带打包机编译出的
 `dtun.ko`，而是在目标服务器安装时针对当前内核编译：
