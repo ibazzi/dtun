@@ -273,7 +273,7 @@ routing on a Hub whose IPv4 forwarding and FORWARD policy allow it:
 sudo sysctl -w net.ipv4.ip_forward=1
 ```
 
-Before adding another Spoke to `SYNC`, the Hub requires `peer-get` to report a
+Before adding another Spoke to `SYNC`, the Hub requires `peer get` to report a
 complete authenticated UDP candidate with `udp_up=true`. The recipient installs
 the peer's distinct bidirectional tunnel IDs and `/32`. Entries absent from a
 later valid SYNC are removed, and periodic registration eventually informs old
@@ -323,9 +323,9 @@ dmesg | grep -i dtun
 Inspect one peer or dump the interface peer snapshot:
 
 ```sh
-sudo ./build/dtunctl peer-get --ifname dtun0 --tunnel-id 100
-sudo ./build/dtunctl peer-list --ifname dtun0
-sudo ./build/dtunctl peer-list --format json
+sudo ./build/dtunctl peer get --ifname dtun0 --tunnel-id 100
+sudo ./build/dtunctl peer list --ifname dtun0
+sudo ./build/dtunctl peer list --format json
 ```
 
 Peer commands default to human-readable output; automation should explicitly
@@ -333,7 +333,7 @@ select `--format json`. `raw_up` and `udp_up` reflect each path's adaptive
 EWMA/RTTVAR threshold.
 
 Peer commands select interfaces by `--ifname`, not `--ifindex`. With no
-selector, `peer-list` discovers every dtun interface and combines their peers;
+selector, `peer list` discovers every dtun interface and combines their peers;
 JSON results use the `ifname` field.
 
 Common issues:

@@ -246,7 +246,7 @@ determine whether Raw enters its active window.
 - There is no explicit deregistration message. Multiple independent probe
   failures beyond the dynamic threshold trigger stale cleanup, and other Spokes
   learn it through periodic SYNC.
-- `dtunctl peer-list` dumps peer snapshots; reserved `STATS_GET` remains
+- `dtunctl peer list` dumps peer snapshots; reserved `STATS_GET` remains
   unimplemented.
 - The tunnel has no congestion control, PMTU discovery, fragmentation strategy,
   or production-grade key management.

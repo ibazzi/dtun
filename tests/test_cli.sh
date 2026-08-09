@@ -18,11 +18,12 @@ expect_rc() {
 	}
 }
 
-expect_rc 2 "$CTL" peer-get --ifname dtun0 --tunnel-id 1 --format yaml
+expect_rc 2 "$CTL" peer get --ifname dtun0 --tunnel-id 1 --format yaml
+expect_rc 2 "$CTL" peer-get --ifname dtun0 --tunnel-id 1
 expect_rc 1 "$CTL" route-add --format json --ifindex 4294967295 --tunnel-id 1 --prefix 10.0.0.0/24
 
 set +e
-json=$($CTL peer-get --format=json --ifname missing-dtun --tunnel-id 1 2>/dev/null)
+json=$($CTL peer get --format=json --ifname missing-dtun --tunnel-id 1 2>/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ]

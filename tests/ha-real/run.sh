@@ -61,7 +61,7 @@ collect_diagnostics() {
         remote "$i" "systemctl --no-pager --full status '$unit' 2>/dev/null | tail -n 20; journalctl -u '$unit' --since '10 minutes ago' --no-pager -o cat 2>/dev/null | tail -n 40" >&2 || true
         if ((i > 0)); then
             echo "--- ${HOSTS[$i]} netns Spoke" >&2
-            remote "$i" "journalctl -u 'dtun-ha-real-spoke-$i.service' --since '10 minutes ago' --no-pager -o cat 2>/dev/null | tail -n 40; ip netns exec 'dtun-ha-real-s$i' ip route 2>/dev/null; ip netns exec 'dtun-ha-real-s$i' /tmp/dtun-ha-real-src/build/dtunctl peer-list --ifname dtun-ha0 2>/dev/null" >&2 || true
+            remote "$i" "journalctl -u 'dtun-ha-real-spoke-$i.service' --since '10 minutes ago' --no-pager -o cat 2>/dev/null | tail -n 40; ip netns exec 'dtun-ha-real-s$i' ip route 2>/dev/null; ip netns exec 'dtun-ha-real-s$i' /tmp/dtun-ha-real-src/build/dtunctl peer list --ifname dtun-ha0 2>/dev/null" >&2 || true
         fi
     done
     echo "--- local Spoke" >&2

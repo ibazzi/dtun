@@ -195,5 +195,5 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - Hub 状态是带版本的本地二进制结构，不保证跨 ABI/架构可移植。
 - Hub 没有显式注销消息；多个独立探测失败并超过动态阈值后执行掉线清理，通知随其他
   Spoke 的周期 SYNC 传播。
-- `dtunctl peer-list` 通过 Generic Netlink dump 枚举 peer；预留的 `STATS_GET` 尚未实现。
+- `dtunctl peer list` 通过 Generic Netlink dump 枚举 peer；预留的 `STATS_GET` 尚未实现。
 - 隧道没有拥塞控制、PMTU 发现、分片重组策略或生产级密钥管理。

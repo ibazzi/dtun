@@ -308,7 +308,7 @@ Hub 转发：
 sudo sysctl -w net.ipv4.ip_forward=1
 ```
 
-Hub 仅在 `peer-get` 显示另一个 Spoke 的认证 UDP 候选为有效时，才把该节点写入
+Hub 仅在 `peer get` 显示另一个 Spoke 的认证 UDP 候选为有效时，才把该节点写入
 `SYNC`。接收方为其安装独立双向 tunnel ID 和 `/32`；后续有效 SYNC 中消失的项会
 被删除。周期注册让老节点最终获得新节点信息。
 
@@ -350,17 +350,17 @@ dmesg | grep -i dtun
 已知本地 tunnel ID 时可查询候选和活跃状态：
 
 ```sh
-sudo ./bin/dtunctl peer-get --ifname dtun0 --tunnel-id 100
-sudo ./bin/dtunctl peer-list --ifname dtun0
-sudo ./bin/dtunctl peer-list --format json
+sudo ./bin/dtunctl peer get --ifname dtun0 --tunnel-id 100
+sudo ./bin/dtunctl peer list --ifname dtun0
+sudo ./bin/dtunctl peer list --format json
 ```
 
-所有 peer 命令使用接口名而不是 ifindex。无参数 `peer-list` 会枚举全部 dtun
+所有 peer 命令使用接口名而不是 ifindex。无参数 `peer list` 会枚举全部 dtun
 接口并合并结果；JSON 中使用 `ifname` 字段。
 
-`peer-get` 必须提供本地 tunnel ID；`peer-list` 使用 Netlink multipart dump 返回一致
+`peer get` 必须提供本地 tunnel ID；`peer list` 使用 Netlink multipart dump 返回一致
 快照。peer 命令默认输出人类可读信息，自动化应显式使用 `--format json`。
-`peer-add`、`peer-set` 和 `peer-del` 在 JSON 模式下也返回带 `success` 和 errno 信息的
+`peer add`、`peer set` 和 `peer del` 在 JSON 模式下也返回带 `success` 和 errno 信息的
 结果对象；JSON 地址缺失时使用 `null`。
 
 常见问题：

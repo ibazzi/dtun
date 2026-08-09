@@ -297,6 +297,7 @@ static int cli_error(const char *action, enum output_format format, int code,
 
 int dtunctl_peer_main(int argc, char **argv) {
   const char *action;
+  const char *command;
   const char *ifname = NULL;
   enum output_format format = FORMAT_HUMAN;
   uint32_t ifindex = 0, tunnel_id = 0, remote_tunnel_id = 0;
@@ -309,17 +310,33 @@ int dtunctl_peer_main(int argc, char **argv) {
   int peer_action;
   int i, result;
 
-  if (argc >= 2 && !strcmp(argv[1], "ha"))
-    return dtunctl_ha_main(argc - 1, argv + 1);
   if (argc < 2) {
-    fprintf(stderr,
-            "Usage: %s "
-            "<peer-add|peer-set|peer-del|peer-get|peer-list|rebind|hub-set|"
-            "route-add|route-del> [options]\n",
-            argv[0]);
+    fprintf(stderr, "Usage: dtunctl peer <add|set|del|get|list> [options]\n");
     return 2;
   }
-  action = argv[1];
+  command = argv[1];
+  if (!strcmp(argv[0], "peer")) {
+    if (!strcmp(command, "add"))
+      action = "peer-add";
+    else if (!strcmp(command, "set"))
+      action = "peer-set";
+    else if (!strcmp(command, "del"))
+      action = "peer-del";
+    else if (!strcmp(command, "get"))
+      action = "peer-get";
+    else if (!strcmp(command, "list"))
+      action = "peer-list";
+    else {
+      fprintf(stderr, "unsupported peer command: %s\n", command);
+      return 2;
+    }
+  } else {
+    if (!strncmp(command, "peer-", 5)) {
+      fprintf(stderr, "unknown command: %s\n", command);
+      return 2;
+    }
+    action = command;
+  }
   peer_action = !strncmp(action, "peer-", 5);
   for (i = 2; i < argc; i++) {
     const char *value = NULL;

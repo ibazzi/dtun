@@ -27,11 +27,11 @@ weighted majority election for three or more Hubs.
   generations, persistent Hub
   state, offline lease expiry, and `/32` direct-peer synchronization between
   Spokes.
-- Peer commands select interfaces with `--ifname`; `peer-list` without a
+- Peer commands select interfaces with `--ifname`; `peer list` without a
   selector combines peers from every dtun interface. Commands support
   `--format json` for automation.
 - Both Raw and UDP outer output pass through IPv4 local-output/netfilter.
-- `dtunctl peer-list` dumps all peers, and peer commands support JSON output.
+- `dtunctl peer list` dumps all peers, and peer commands support JSON output.
 
 The current release effectively supports IPv4 forwarding only. It has no
 encryption, key rotation, live configuration reload, or general outer-frame

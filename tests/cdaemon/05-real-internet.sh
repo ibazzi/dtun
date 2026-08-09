@@ -66,7 +66,7 @@ fi
 section "peer state (remote hub session)"
 IFACE=$(cat /sys/class/net/dtun0/ifindex 2>/dev/null || echo "")
 if [ -n "$IFACE" ]; then
-	peer=$("$CTL" peer-get --format json --ifname dtun0 --tunnel-id 100 2>/dev/null || true)
+	peer=$("$CTL" peer get --format json --ifname dtun0 --tunnel-id 100 2>/dev/null || true)
 	echo "$peer"
 	echo "$peer" | grep -q '"udp_up":true' && ok "hub UDP candidate up" || fail "hub UDP candidate down"
 else

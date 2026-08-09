@@ -116,6 +116,7 @@ $(BUILD_DIR)/dtunctl: $(OBJ_DIR)/dtunctl/main.o $(DTUNCTL_OBJS) \
 		$(LDFLAGS) $(LDLIBS) -o $@
 
 $(OBJ_DIR)/dtunctl/main.o: $(SRC_DIR)/dtunctl/main.c \
+		$(SRC_DIR)/dtunctl/ha_commands.h \
 		$(SRC_DIR)/dtunctl/peer_commands.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
