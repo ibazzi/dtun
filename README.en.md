@@ -27,8 +27,6 @@ weighted majority election for three or more Hubs.
   generations, persistent Hub
   state, offline lease expiry, and `/32` direct-peer synchronization between
   Spokes.
-- C `dtund` and `dtunctl` are the only supported control plane; Python remains
-  only in packet-generation test helpers.
 - Peer commands select interfaces with `--ifname`; `peer-list` without a
   selector combines peers from every dtun interface. Commands support
   `--format json` for automation.
@@ -45,7 +43,7 @@ complete boundaries.
 | Component | Purpose |
 | --- | --- |
 | `dtun.ko` | Kernel data plane and Netlink interfaces |
-| `bin/dtund` | C-only Hub/Spoke control plane |
+| `bin/dtund` | Hub/Spoke control-plane daemon |
 | `bin/dtunctl` | CLI for peers, prefixes, and peer status |
 | `bin/ip` | Prebuilt iproute2 binary with the dtun link extension |
 | `samples/` | Hub and Spoke configuration examples |

@@ -23,7 +23,6 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 - 探测周期与离线阈值由 EWMA/RTTVAR 自适应计算；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
 - `dtunctl peer-list` 自动列出所有 dtun 接口的 peer；peer 命令使用
   `--ifname NAME`并支持 `--format json`。
-- C `dtund` 和 `dtunctl` 是唯一正式控制面；Python 仅用于测试造包。
 - Raw 和 UDP 外层发送均进入 IPv4 local-output/netfilter 路径。
 
 当前版本实际上只支持 IPv4 端到端转发，不提供加密、密钥轮换、在线配置重载或
@@ -34,7 +33,7 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 | 组件 | 用途 |
 | --- | --- |
 | `dtun.ko` | 内核数据面和 Netlink 接口 |
-| `bin/dtund` | C-only Hub/Spoke 控制面 |
+| `bin/dtund` | Hub/Spoke 控制面守护进程 |
 | `bin/dtunctl` | peer、前缀和状态查询 CLI |
 | `bin/ip` | 带 dtun link 扩展的预编译 iproute2 工具 |
 | `samples/` | Hub 和 Spoke 配置样例 |

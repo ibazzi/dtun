@@ -3,7 +3,7 @@
 **English** | [简体中文](dtun-design.md)
 
 This document describes the current source implementation rather than future
-plans. The registration protocol is C-only DTRG and remains under development;
+plans. The DTRG registration protocol remains under development;
 only Hub and Spoke binaries built from the same source revision are expected to
 interoperate.
 
