@@ -75,6 +75,7 @@ check: check-format ctools test-binaries
 	$(BUILD_DIR)/test_ha_join
 	$(BUILD_DIR)/test_spoke_ha
 	$(BUILD_DIR)/test_liveness
+	$(BUILD_DIR)/test_nat_policy
 	CTL=$(BUILD_DIR)/dtunctl sh tests/test_cli.sh
 	CTL=$(BUILD_DIR)/dtunctl sh tests/test_ha_cli.sh
 	sh -n tests/netns-smoke.sh tests/p2mp-netns.sh tests/cdaemon/lib.sh

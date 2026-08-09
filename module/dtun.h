@@ -16,6 +16,7 @@
 #include <linux/workqueue.h>
 #include <net/genetlink.h>
 
+#include <dtun/nat_policy.h>
 #include <dtun/uapi.h>
 
 #define DTUN_NAME "dtun"
@@ -26,6 +27,11 @@
 #define DTUN_KEY_LEN 32
 #define DTUN_PROBE_MAGIC 0x44545032U
 #define DTUN_LOSS_Q16_TWO_PERCENT 1311U
+
+#define DTUN_PROBE_F_BEGIN BIT(0)
+#define DTUN_PROBE_F_CHECK BIT(1)
+#define DTUN_PROBE_F_ENDPOINT_CHANGED BIT(2)
+#define DTUN_PROBE_F_CALIBRATED BIT(3)
 
 enum dtun_frame_type {
   DTUN_FRAME_DATA = 1,
@@ -55,7 +61,39 @@ struct dtun_hdr {
 struct dtun_probe_payload {
   __be32 magic;
   __be64 probe_id;
+  __be32 calibration_epoch;
+  __be32 requested_silence_ms;
+  __be32 advertised_safe_ms;
+  u8 flags;
+  u8 reserved[3];
 } __packed;
+
+enum dtun_nat_phase {
+  DTUN_NAT_IDLE = 0,
+  DTUN_NAT_WAIT_BEGIN,
+  DTUN_NAT_SILENT,
+  DTUN_NAT_WAIT_CHECK,
+  DTUN_NAT_CALIBRATED,
+};
+
+struct dtun_nat_calibration {
+  u32 epoch;
+  u32 remote_epoch;
+  u32 step;
+  u32 trial_ms;
+  u32 last_success_ms;
+  u32 local_safe_ms;
+  u32 remote_safe_ms;
+  u8 phase;
+  u8 check_failures;
+  bool remote_calibrated;
+  unsigned long deadline;
+  unsigned long silence_until;
+  unsigned long last_rx;
+  unsigned long next_calibration;
+  __be32 remote_begin_addr;
+  __be16 remote_begin_port;
+};
 
 struct dtun_path_health {
   u64 srtt_us;
@@ -100,6 +138,8 @@ struct dtun_peer {
   bool dynamic_raw;
   struct dtun_path_health raw_health;
   struct dtun_path_health udp_health;
+  struct dtun_nat_calibration nat;
+  unsigned long direct_activation_after;
   atomic64_t tx_seq;
   u64 rx_highest;
   u64 rx_window[DTUN_REPLAY_BITMAP_LENS];
@@ -154,5 +194,6 @@ void dtun_path_note_ack(struct dtun_peer *peer, struct dtun_path_health *health,
                         u64 probe_id);
 void dtun_path_tick(struct dtun_peer *peer, struct dtun_path_health *health);
 bool dtun_path_available(const struct dtun_path_health *health);
+void dtun_nat_reset(struct dtun_peer *peer);
 
 #endif

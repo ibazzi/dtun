@@ -98,8 +98,10 @@ track IGMP membership, so this is all-peer flooding; multicast is also dropped
 when there are no peers. Every copy uses that peer's own tunnel IDs, sequence,
 HMAC, and path selection.
 
-At each path's adaptive EWMA/RTTVAR cadence, a workqueue does the following for
-each peer:
+A workqueue schedules probes for each peer according to path state. Spoke peer
+hole punching starts at 250 ms, a healthy selected direct path uses 1000--1250
+ms, suspect paths return to 250 ms, and offline paths retry every 2000 ms. Hub
+and HA EWMA/RTTVAR cadences are unchanged:
 
 - sends a Raw PROBE when a Raw address is configured;
 - sends a UDP PROBE when a UDP `IP:port` is configured;
@@ -113,6 +115,27 @@ The actual DATA selection rules are:
    adaptive threshold.
 3. Otherwise re-encapsulate through the node-1 Hub peer; the Hub then forwards
    according to the inner IPv4 route.
+
+When Raw carries traffic and UDP is only a standby path, authenticated extended
+PROBEs let both peers learn their NAT mapping lifetimes. The fixed network-order
+payload contains the probe ID, calibration epoch, requested silence, advertised
+safe interval, and `BEGIN`, `CHECK`, `ENDPOINT_CHANGED`, and `CALIBRATED` flags.
+In NodeID order, the peers take turns testing 5, 8, 12, 18, 27, 40, and 60
+seconds of silence. The receiver compares the authenticated source endpoint at
+BEGIN and CHECK. The safe interval is 75% of the last successful step, clamped
+to 5--45 seconds.
+
+After both sides finish, only the lower NodeID sends standby UDP heartbeats at
+the smaller advertised safe interval; the other peer only replies and takes
+over after two missed intervals. Candidate generation, authenticated endpoint,
+or route changes reset learning, and a stable path recalibrates after 30
+minutes. Calibration pauses only standby UDP, never the selected Raw path, Hub,
+or application traffic.
+
+When a selected direct path becomes suspect, silence is cancelled and traffic
+falls back to the Hub while the standby is forced through a new validation.
+Health observed before the failure cannot activate a path; a fresh
+post-failure authenticated ACK is required.
 
 ## 6. Outer transmission and lifecycle
 

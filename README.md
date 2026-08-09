@@ -20,7 +20,7 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 - Raw IP 为首选路径；Raw 不可用时使用已配置的 UDP 端点。
 - 有效 UDP 帧通过 HMAC 后可以更新 NAT 映射得到的来源 `IP:port`。
 - DTRG 控制面支持轻量 REFRESH、候选代次、分页同步、Hub 状态持久化和 spoke 间 `/32` 直连同步。
-- 探测周期与离线阈值由 EWMA/RTTVAR 自适应计算；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
+- Spoke 直连使用低频状态心跳；Raw 主用时会双向学习备用 UDP 的 NAT 安全周期，认证 UDP 来源变化会重置学习并重新验证 Raw。
 - `dtunctl peer list` 自动列出所有 dtun 接口的 peer；peer 命令使用
   `--ifname NAME`并支持 `--format json`。
 - Raw 和 UDP 外层发送均进入 IPv4 local-output/netfilter 路径。

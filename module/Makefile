@@ -21,6 +21,8 @@ prepare:
 	@ln -snf $(MODULE_DIR)/dtun.h $(MODULE_BUILD_DIR)/dtun.h
 	@ln -snf $(MODULE_DIR)/dtun_main.c $(MODULE_BUILD_DIR)/dtun_main.c
 	@ln -snf $(MODULE_DIR)/dtun_netlink.c $(MODULE_BUILD_DIR)/dtun_netlink.c
+	@cp -f $(ROOT_DIR)/include/dtun/nat_policy.h \
+		$(BUILD_DIR)/include/dtun/nat_policy.h
 	@cp -f $(ROOT_DIR)/include/dtun/uapi.h $(BUILD_DIR)/include/dtun/uapi.h
 
 clean:

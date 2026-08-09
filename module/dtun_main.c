@@ -65,14 +65,30 @@ void dtun_path_health_init(struct dtun_path_health *health) {
   health->state = DTUN_HEALTH_UNKNOWN;
 }
 
+void dtun_nat_reset(struct dtun_peer *peer) {
+  u32 epoch = dtun_nat_next_epoch(peer->nat.epoch);
+
+  memset(&peer->nat, 0, sizeof(peer->nat));
+  peer->nat.epoch = epoch;
+  peer->nat.last_rx = jiffies;
+  peer->udp_health.pending = 0;
+  peer->udp_health.duplicate_pending = 0;
+  peer->udp_health.next_probe = jiffies;
+}
+
 u32 dtun_path_probe_interval_ms(const struct dtun_peer *peer,
                                 const struct dtun_path_health *health) {
   u64 estimate_us = health->srtt_us + 2 * health->rttvar_us;
 
   if (health->state == DTUN_HEALTH_SUSPECT)
-    return 100;
-  if (peer->node_id != 1)
-    return dtun_clamp_ms(div_u64(2 * estimate_us + 999, 1000), 250, 750);
+    return peer->node_id == 1 ? 100 : 250;
+  if (peer->node_id != 1) {
+    if (health->state == DTUN_HEALTH_OFFLINE)
+      return 2000;
+    if (!health->initialized)
+      return 250;
+    return 1000 + (u32)(health->probe_id % 251);
+  }
   return dtun_clamp_ms(div_u64(estimate_us + 999, 1000), 100, 250);
 }
 
@@ -91,7 +107,7 @@ u32 dtun_path_offline_ms(const struct dtun_peer *peer,
                        dtun_path_miss_budget(health) * interval);
 
   return peer->node_id == 1 ? dtun_clamp_ms(deadline, 600, 900)
-                            : dtun_clamp_ms(deadline, 900, 1800);
+                            : dtun_clamp_ms(deadline, 3000, 5000);
 }
 
 u32 dtun_path_loss_ppm(const struct dtun_path_health *health) {
@@ -134,6 +150,11 @@ void dtun_path_tick(struct dtun_peer *peer, struct dtun_path_health *health) {
                        ? div_u64(now_ns - health->probe_sent_ns, 1000000)
                        : 0;
   unsigned long offline = msecs_to_jiffies(dtun_path_offline_ms(peer, health));
+
+  if (health == &peer->udp_health &&
+      (peer->nat.phase != DTUN_NAT_IDLE ||
+       time_before(jiffies, peer->nat.silence_until)))
+    return;
 
   if (health->pending && pending_ms >= dtun_path_rto_ms(peer, health))
     health->state = DTUN_HEALTH_SUSPECT;
@@ -196,6 +217,95 @@ static struct dtun_peer *dtun_peer_get_by_node(struct dtun_dev *d,
     refcount_inc(&peer->refs);
   spin_unlock_bh(&d->peer_lock);
   return peer;
+}
+
+static bool dtun_udp_is_standby_locked(const struct dtun_peer *peer) {
+  return peer->node_id != 1 && peer->raw_validated_addr &&
+         peer->raw_health.state == DTUN_HEALTH_HEALTHY;
+}
+
+static void dtun_nat_finish_locked(struct dtun_peer *peer) {
+  peer->nat.local_safe_ms = dtun_nat_safe_ms(peer->nat.last_success_ms);
+  peer->nat.phase = DTUN_NAT_CALIBRATED;
+  peer->nat.check_failures = 0;
+  peer->nat.silence_until = 0;
+  peer->nat.next_calibration =
+      jiffies + msecs_to_jiffies(DTUN_NAT_RECALIBRATE_MS);
+  netdev_info(peer->tdev->dev,
+              "peer %llu standby UDP NAT calibrated: safe_interval=%u ms\n",
+              peer->node_id, peer->nat.local_safe_ms);
+}
+
+static void dtun_nat_note_udp_ack_locked(struct dtun_peer *peer,
+                                         const struct dtun_probe_payload *probe,
+                                         bool endpoint_changed) {
+  u32 epoch = be32_to_cpu(probe->calibration_epoch);
+
+  peer->nat.last_rx = jiffies;
+  if (probe->flags & DTUN_PROBE_F_CALIBRATED) {
+    peer->nat.remote_safe_ms = be32_to_cpu(probe->advertised_safe_ms);
+    peer->nat.remote_calibrated = peer->nat.remote_safe_ms != 0;
+  }
+  if (endpoint_changed || !dtun_nat_epoch_matches(peer->nat.epoch, epoch))
+    return;
+  if (peer->nat.phase == DTUN_NAT_WAIT_BEGIN &&
+      (probe->flags & DTUN_PROBE_F_BEGIN)) {
+    peer->nat.phase = DTUN_NAT_SILENT;
+    peer->nat.deadline = jiffies + msecs_to_jiffies(peer->nat.trial_ms);
+    peer->nat.silence_until = peer->nat.deadline;
+    peer->nat.check_failures = 0;
+  } else if (peer->nat.phase == DTUN_NAT_WAIT_CHECK &&
+             (probe->flags & DTUN_PROBE_F_CHECK)) {
+    if (probe->flags & DTUN_PROBE_F_ENDPOINT_CHANGED) {
+      dtun_nat_finish_locked(peer);
+    } else {
+      peer->nat.last_success_ms = peer->nat.trial_ms;
+      peer->nat.step++;
+      peer->nat.check_failures = 0;
+      if (!dtun_nat_trial_ms(peer->nat.step))
+        dtun_nat_finish_locked(peer);
+      else
+        peer->nat.phase = DTUN_NAT_IDLE;
+    }
+  }
+}
+
+static void dtun_nat_prepare_reply_locked(struct dtun_peer *peer,
+                                          struct dtun_probe_payload *probe,
+                                          __be32 src, __be16 port) {
+  u32 requested_ms = be32_to_cpu(probe->requested_silence_ms);
+  u32 epoch = be32_to_cpu(probe->calibration_epoch);
+  u8 reply_flags = probe->flags & (DTUN_PROBE_F_BEGIN | DTUN_PROBE_F_CHECK);
+
+  peer->nat.last_rx = jiffies;
+  if (probe->flags & DTUN_PROBE_F_CALIBRATED) {
+    peer->nat.remote_safe_ms = be32_to_cpu(probe->advertised_safe_ms);
+    peer->nat.remote_calibrated = peer->nat.remote_safe_ms != 0;
+  }
+  if ((reply_flags & DTUN_PROBE_F_BEGIN) && dtun_udp_is_standby_locked(peer)) {
+    requested_ms = dtun_clamp_ms(requested_ms, 5000, 60000);
+    peer->nat.remote_epoch = epoch;
+    peer->nat.remote_begin_addr = src;
+    peer->nat.remote_begin_port = port;
+    peer->nat.silence_until = jiffies + msecs_to_jiffies(requested_ms);
+  } else if (reply_flags & DTUN_PROBE_F_BEGIN) {
+    reply_flags &= ~DTUN_PROBE_F_BEGIN;
+  }
+  if (reply_flags & DTUN_PROBE_F_CHECK) {
+    if (!dtun_nat_epoch_matches(peer->nat.remote_epoch, epoch) ||
+        dtun_nat_endpoint_changed(peer->nat.remote_begin_addr,
+                                  peer->nat.remote_begin_port, src, port))
+      reply_flags |= DTUN_PROBE_F_ENDPOINT_CHANGED;
+    peer->nat.silence_until = 0;
+  }
+  if (peer->nat.phase == DTUN_NAT_CALIBRATED) {
+    reply_flags |= DTUN_PROBE_F_CALIBRATED;
+    probe->advertised_safe_ms = cpu_to_be32(peer->nat.local_safe_ms);
+  } else {
+    probe->advertised_safe_ms = 0;
+  }
+  probe->flags = reply_flags;
+  memset(probe->reserved, 0, sizeof(probe->reserved));
 }
 
 static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
@@ -269,19 +379,26 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
        * configured Hub relay endpoint is kept stable. */
       endpoint_changed =
           peer->direct_udp_addr != src || peer->direct_udp_port != port;
-      if (endpoint_changed)
+      if (endpoint_changed) {
         dtun_path_health_init(&peer->udp_health);
+        dtun_nat_reset(peer);
+      }
       peer->direct_udp_port = port;
       peer->direct_udp_addr = src;
       if (peer->dynamic_raw && peer->raw_addr != src) {
         peer->raw_addr = src;
         peer->raw_validated_addr = 0;
         dtun_path_health_init(&peer->raw_health);
+        dtun_nat_reset(peer);
       }
     }
-    if (hdr->type == DTUN_FRAME_KEEPALIVE && has_probe_payload)
+    if (hdr->type == DTUN_FRAME_KEEPALIVE && has_probe_payload) {
       dtun_path_note_ack(peer, &peer->udp_health,
                          be64_to_cpu(probe_payload.probe_id));
+      dtun_nat_note_udp_ack_locked(peer, &probe_payload, endpoint_changed);
+    } else if (hdr->type == DTUN_FRAME_PROBE && has_probe_payload) {
+      dtun_nat_prepare_reply_locked(peer, &probe_payload, src, port);
+    }
   }
   reply_probe = hdr->type == DTUN_FRAME_PROBE;
   spin_unlock_bh(&peer->state_lock);
@@ -449,14 +566,21 @@ static int dtun_peer_snapshot(struct dtun_dev *d,
 static enum dtun_transport dtun_choose_path(struct dtun_peer *peer,
                                             __be32 *addr, __be16 *port) {
   spin_lock_bh(&peer->state_lock);
-  if (peer->raw_validated_addr && dtun_path_available(&peer->raw_health)) {
+  if (peer->raw_validated_addr &&
+      peer->raw_health.state == DTUN_HEALTH_HEALTHY &&
+      (!peer->direct_activation_after ||
+       time_after_eq(peer->raw_health.last_ack,
+                     peer->direct_activation_after))) {
     *addr = peer->raw_validated_addr;
     *port = 0;
     spin_unlock_bh(&peer->state_lock);
     return DTUN_TRANSPORT_RAW;
   }
   if (peer->direct_udp_addr && peer->direct_udp_port &&
-      dtun_path_available(&peer->udp_health)) {
+      peer->udp_health.state == DTUN_HEALTH_HEALTHY &&
+      (!peer->direct_activation_after ||
+       time_after_eq(peer->udp_health.last_ack,
+                     peer->direct_activation_after))) {
     *addr = peer->direct_udp_addr;
     *port = peer->direct_udp_port;
     spin_unlock_bh(&peer->state_lock);
@@ -881,9 +1005,19 @@ static void dtun_probe_path(struct dtun_dev *d, struct dtun_peer *peer,
                             __be16 port) {
   struct dtun_probe_payload payload;
   bool duplicate_only = false;
+  u8 previous_state;
 
   spin_lock_bh(&peer->state_lock);
+  memset(&payload, 0, sizeof(payload));
+  previous_state = health->state;
   dtun_path_tick(peer, health);
+  if (peer->node_id != 1 && previous_state == DTUN_HEALTH_HEALTHY &&
+      health->state == DTUN_HEALTH_SUSPECT) {
+    peer->direct_activation_after = jiffies;
+    peer->raw_health.next_probe = jiffies;
+    peer->udp_health.next_probe = jiffies;
+    dtun_nat_reset(peer);
+  }
   if (health->duplicate_pending &&
       time_after_eq(jiffies, health->duplicate_probe)) {
     health->duplicate_pending = 0;
@@ -919,6 +1053,140 @@ static void dtun_probe_path(struct dtun_dev *d, struct dtun_peer *peer,
 
   (void)dtun_send_path(d, peer, DTUN_FRAME_PROBE, (const u8 *)&payload,
                        sizeof(payload), transport, addr, port);
+}
+
+static void dtun_nat_begin_probe_locked(struct dtun_peer *peer,
+                                        struct dtun_probe_payload *payload,
+                                        u8 flags) {
+  struct dtun_path_health *health = &peer->udp_health;
+
+  memset(payload, 0, sizeof(*payload));
+  health->probe_id++;
+  if (!health->probe_id)
+    health->probe_id++;
+  health->probe_sent_ns = ktime_get_mono_fast_ns();
+  health->pending = 1;
+  health->duplicate_pending = 0;
+  payload->magic = cpu_to_be32(DTUN_PROBE_MAGIC);
+  payload->probe_id = cpu_to_be64(health->probe_id);
+  payload->calibration_epoch = cpu_to_be32(peer->nat.epoch);
+  payload->requested_silence_ms = cpu_to_be32(peer->nat.trial_ms);
+  payload->advertised_safe_ms = cpu_to_be32(peer->nat.local_safe_ms);
+  payload->flags = flags;
+  if (peer->nat.phase == DTUN_NAT_CALIBRATED)
+    payload->flags |= DTUN_PROBE_F_CALIBRATED;
+}
+
+static bool dtun_udp_calibration_work(struct dtun_dev *d,
+                                      struct dtun_peer *peer, __be32 addr,
+                                      __be16 port) {
+  struct dtun_probe_payload payload;
+  struct dtun_nat_calibration *nat = &peer->nat;
+  u32 shared_ms = 0;
+  bool send = false;
+  bool owner;
+
+  spin_lock_bh(&peer->state_lock);
+  if (!dtun_udp_is_standby_locked(peer) || !peer->direct_udp_addr ||
+      !peer->direct_udp_port || !peer->udp_health.initialized ||
+      peer->udp_health.state != DTUN_HEALTH_HEALTHY) {
+    if (nat->phase != DTUN_NAT_IDLE)
+      dtun_nat_reset(peer);
+    spin_unlock_bh(&peer->state_lock);
+    return false;
+  }
+  if (nat->phase == DTUN_NAT_CALIBRATED && nat->next_calibration &&
+      time_after_eq(jiffies, nat->next_calibration))
+    dtun_nat_reset(peer);
+  if (time_before(jiffies, nat->silence_until)) {
+    spin_unlock_bh(&peer->state_lock);
+    return true;
+  }
+
+  if (nat->phase == DTUN_NAT_CALIBRATED) {
+    shared_ms =
+        dtun_nat_shared_safe_ms(nat->local_safe_ms, nat->remote_safe_ms);
+    owner = dtun_nat_local_is_owner(d->node_id, peer->node_id) ||
+            !nat->remote_calibrated;
+    if (!owner && shared_ms &&
+        dtun_nat_takeover_due(jiffies_to_msecs(jiffies - nat->last_rx),
+                              shared_ms)) {
+      netdev_info(d->dev,
+                  "peer %llu standby UDP heartbeat takeover after two "
+                  "missed intervals\n",
+                  peer->node_id);
+      peer->udp_health.state = DTUN_HEALTH_SUSPECT;
+      dtun_nat_reset(peer);
+      spin_unlock_bh(&peer->state_lock);
+      return false;
+    }
+    if (owner && time_after_eq(jiffies, peer->udp_health.next_probe)) {
+      if (peer->udp_health.pending && peer->udp_health.failed_rounds != U32_MAX)
+        peer->udp_health.failed_rounds++;
+      if (peer->udp_health.failed_rounds >= 2) {
+        peer->udp_health.state = DTUN_HEALTH_SUSPECT;
+        dtun_nat_reset(peer);
+        spin_unlock_bh(&peer->state_lock);
+        return false;
+      }
+      dtun_nat_begin_probe_locked(peer, &payload, 0);
+      peer->udp_health.next_probe =
+          jiffies +
+          msecs_to_jiffies(shared_ms ? shared_ms : nat->local_safe_ms);
+      send = true;
+    }
+    spin_unlock_bh(&peer->state_lock);
+    if (send)
+      (void)dtun_send_path(d, peer, DTUN_FRAME_PROBE, (const u8 *)&payload,
+                           sizeof(payload), DTUN_TRANSPORT_UDP, addr, port);
+    return true;
+  }
+
+  if (nat->phase == DTUN_NAT_IDLE) {
+    if (d->node_id > peer->node_id && !nat->remote_calibrated) {
+      spin_unlock_bh(&peer->state_lock);
+      return true;
+    }
+    nat->trial_ms = dtun_nat_trial_ms(nat->step);
+    if (!nat->trial_ms) {
+      dtun_nat_finish_locked(peer);
+      spin_unlock_bh(&peer->state_lock);
+      return true;
+    }
+    dtun_nat_begin_probe_locked(peer, &payload, DTUN_PROBE_F_BEGIN);
+    nat->phase = DTUN_NAT_WAIT_BEGIN;
+    nat->deadline =
+        jiffies + msecs_to_jiffies(dtun_path_rto_ms(peer, &peer->udp_health));
+    send = true;
+  } else if (nat->phase == DTUN_NAT_SILENT &&
+             time_after_eq(jiffies, nat->deadline)) {
+    nat->silence_until = 0;
+    dtun_nat_begin_probe_locked(peer, &payload, DTUN_PROBE_F_CHECK);
+    nat->phase = DTUN_NAT_WAIT_CHECK;
+    nat->deadline =
+        jiffies + msecs_to_jiffies(dtun_path_rto_ms(peer, &peer->udp_health));
+    send = true;
+  } else if ((nat->phase == DTUN_NAT_WAIT_BEGIN ||
+              nat->phase == DTUN_NAT_WAIT_CHECK) &&
+             time_after_eq(jiffies, nat->deadline)) {
+    nat->check_failures++;
+    if (dtun_nat_stop_growth(nat->check_failures, false)) {
+      dtun_nat_finish_locked(peer);
+    } else {
+      u8 flags = nat->phase == DTUN_NAT_WAIT_BEGIN ? DTUN_PROBE_F_BEGIN
+                                                   : DTUN_PROBE_F_CHECK;
+
+      dtun_nat_begin_probe_locked(peer, &payload, flags);
+      nat->deadline =
+          jiffies + msecs_to_jiffies(dtun_path_rto_ms(peer, &peer->udp_health));
+      send = true;
+    }
+  }
+  spin_unlock_bh(&peer->state_lock);
+  if (send)
+    (void)dtun_send_path(d, peer, DTUN_FRAME_PROBE, (const u8 *)&payload,
+                         sizeof(payload), DTUN_TRANSPORT_UDP, addr, port);
+  return true;
 }
 
 static void dtun_probe_work(struct work_struct *work) {
@@ -958,10 +1226,11 @@ static void dtun_probe_work(struct work_struct *work) {
     if (raw_addr)
       dtun_probe_path(d, peer, &peer->raw_health, DTUN_TRANSPORT_RAW, raw_addr,
                       0);
-    if (udp_addr && udp_port)
-      dtun_probe_path(d, peer, &peer->udp_health, DTUN_TRANSPORT_UDP, udp_addr,
-                      udp_port);
-    else {
+    if (udp_addr && udp_port) {
+      if (!dtun_udp_calibration_work(d, peer, udp_addr, udp_port))
+        dtun_probe_path(d, peer, &peer->udp_health, DTUN_TRANSPORT_UDP,
+                        udp_addr, udp_port);
+    } else {
       __be32 hub_addr;
       __be16 hub_port;
       dtun_hub_endpoint(d, &hub_addr, &hub_port);

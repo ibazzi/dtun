@@ -318,6 +318,13 @@ Hub 仅在 `peer get` 显示另一个 Spoke 的认证 UDP 候选为有效时，�
 Hub 只在多个独立探测轮次失败且超过动态阈值后移除活跃内核路径；地址和
 tunnel/session ID 仍按 `identity_retention` 保留，重连可复用原身份。
 
+Spoke 间初始打洞周期为 250ms；健康的当前直连使用 1000--1250ms 心跳，suspect
+恢复为 250ms，offline 后每 2000ms 重试。UDP 正在承载业务时，这个心跳已足以维持
+NAT，不再额外校准。Raw 为主、UDP 为备用时，双方自动以 5、8、12、18、27、40、
+60 秒阶梯学习各自 NAT 映射，取最后成功值的 75%（限制为 5--45 秒）。完成后由较小
+NodeID 单向发起备用心跳，另一端只回复；候选、认证端点或路由改变会重置学习。
+该机制没有配置键，并要求通信双方同步升级。
+
 内核发送路径的实际顺序是：
 
 ```text
@@ -327,6 +334,9 @@ tunnel/session ID 仍按 `identity_retention` 保留，重连可复用原身份�
 Hub 同步的 rendezvous 地址只用于打洞；只有直接收到认证包后才设置 `udp_up`。
 直连不可用时内核改用 Hub peer 重新封装，因此 tunnel ID/HMAC 与 Hub 会话匹配，
 再由 Hub 按内层 IPv4 路由转发。
+
+当前路径一旦进入 suspect，内核立即取消备用 UDP 静默并先回退 Hub；备用路径只有
+收到故障发生后的新认证 ACK 才能接管，避免用陈旧 NAT 映射直接承载业务。
 
 常驻 Spoke 只在路径状态变化时记录日志：收到新 rendezvous 候选时记录
 `Hole punching started`，认证直连成功时记录 `Direct UDP established` 或

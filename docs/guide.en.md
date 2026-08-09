@@ -299,6 +299,22 @@ peer directly observes an authenticated source. When direct paths fail, the
 packet is re-encapsulated with the Hub peer's tunnel ID and HMAC, then forwarded
 according to the inner IPv4 route at the Hub.
 
+Spoke peer hole punching starts at 250 ms. A healthy selected direct path uses
+a 1000--1250 ms heartbeat, suspect paths return to 250 ms, and offline paths
+retry every 2000 ms. When UDP carries traffic, that heartbeat already maintains
+the NAT mapping and no separate calibration runs. When Raw is selected and UDP
+is standby, both peers automatically test 5, 8, 12, 18, 27, 40, and 60 seconds
+of silence and use 75% of the last successful step, clamped to 5--45 seconds.
+The lower NodeID sends the resulting one-way standby heartbeat and the other
+peer only replies. Candidate, authenticated endpoint, or route changes reset
+learning. There is no configuration key, and both peers must be upgraded
+together.
+
+As soon as the selected direct path becomes suspect, standby silence is
+cancelled and traffic falls back to the Hub. A standby path needs a fresh
+authenticated ACK after that failure before it may carry traffic; an old NAT
+observation cannot activate it.
+
 A resident Spoke logs path transitions only: `Hole punching started` for a new
 rendezvous candidate, `Direct UDP established` or `Direct Raw established` for
 an authenticated direct path, `Direct path recovered` after recovery, and

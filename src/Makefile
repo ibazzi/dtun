@@ -63,7 +63,8 @@ TEST_BINS := \
 	$(BUILD_DIR)/test_ha_runtime \
 	$(BUILD_DIR)/test_ha_join \
 	$(BUILD_DIR)/test_spoke_ha \
-	$(BUILD_DIR)/test_liveness
+	$(BUILD_DIR)/test_liveness \
+	$(BUILD_DIR)/test_nat_policy
 
 ALL_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(HA_OBJS) $(NETLINK_OBJS) \
 	$(DTUND_OBJS) $(DTUNCTL_OBJS)
@@ -157,6 +158,10 @@ $(BUILD_DIR)/test_liveness: $(ROOT_DIR)/tests/test_liveness.c \
 		$(LIB_DIR)/libdtun_core.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB_DIR)/libdtun_core.a -o $@
+
+$(BUILD_DIR)/test_nat_policy: $(ROOT_DIR)/tests/test_nat_policy.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@
 
 clean:
 	rm -rf $(OBJ_DIR) $(LIB_DIR) $(BUILD_DIR)/ctl

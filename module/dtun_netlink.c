@@ -117,6 +117,7 @@ static int dtun_nl_peer_add(struct sk_buff *skb, struct genl_info *info) {
   spin_lock_init(&peer->state_lock);
   dtun_path_health_init(&peer->raw_health);
   dtun_path_health_init(&peer->udp_health);
+  dtun_nat_reset(peer);
   if (info->attrs[DTUN_A_KEY]) {
     err = dtun_peer_set_key(peer, nla_data(info->attrs[DTUN_A_KEY]),
                             nla_len(info->attrs[DTUN_A_KEY]));
@@ -185,6 +186,7 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
       peer->raw_validated_addr = 0;
       dtun_path_health_init(&peer->udp_health);
       dtun_path_health_init(&peer->raw_health);
+      dtun_nat_reset(peer);
     }
   }
   if (info->attrs[DTUN_A_REMOTE_TUNNEL_ID])
@@ -194,8 +196,10 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
     memcpy(&raw_addr, nla_data(info->attrs[DTUN_A_RAW_ADDR]), 4);
     if (raw_addr != peer->raw_addr)
       peer->raw_validated_addr = 0;
-    if (raw_addr != peer->raw_addr)
+    if (raw_addr != peer->raw_addr) {
       dtun_path_health_init(&peer->raw_health);
+      dtun_nat_reset(peer);
+    }
     peer->raw_addr = raw_addr;
   }
   if (accept_candidates &&
@@ -206,8 +210,10 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
       memcpy(&udp_addr, nla_data(info->attrs[DTUN_A_UDP_ADDR]), 4);
     if (info->attrs[DTUN_A_UDP_PORT])
       udp_port = nla_get_be16(info->attrs[DTUN_A_UDP_PORT]);
-    if (udp_addr != peer->udp_addr || udp_port != peer->udp_port)
+    if (udp_addr != peer->udp_addr || udp_port != peer->udp_port) {
       dtun_path_health_init(&peer->udp_health);
+      dtun_nat_reset(peer);
+    }
     peer->udp_addr = udp_addr;
     peer->udp_port = udp_port;
   }
@@ -219,6 +225,10 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
       memcpy(&addr, nla_data(info->attrs[DTUN_A_RENDEZVOUS_UDP_ADDR]), 4);
     if (info->attrs[DTUN_A_RENDEZVOUS_UDP_PORT])
       port = nla_get_be16(info->attrs[DTUN_A_RENDEZVOUS_UDP_PORT]);
+    if (addr != peer->udp_addr || port != peer->udp_port) {
+      dtun_path_health_init(&peer->udp_health);
+      dtun_nat_reset(peer);
+    }
     peer->udp_addr = addr;
     peer->udp_port = port;
   }
@@ -260,6 +270,11 @@ static int dtun_nl_route(struct sk_buff *skb, struct genl_info *info,
     else
       err = dtun_del_prefix(peer, prefix,
                             nla_get_u8(info->attrs[DTUN_A_PREFIX_LEN]));
+    if (!err) {
+      spin_lock_bh(&peer->state_lock);
+      dtun_nat_reset(peer);
+      spin_unlock_bh(&peer->state_lock);
+    }
     spin_unlock_bh(&d->peer_lock);
   }
   rtnl_unlock();
@@ -295,9 +310,15 @@ static void dtun_snapshot_peer(struct dtun_dev *d, struct dtun_peer *peer,
   dtun_path_tick(peer, &peer->raw_health);
   dtun_path_tick(peer, &peer->udp_health);
   status->raw_up =
-      peer->raw_validated_addr && dtun_path_available(&peer->raw_health);
-  status->udp_up = peer->direct_udp_addr && peer->direct_udp_port &&
-                   dtun_path_available(&peer->udp_health);
+      peer->raw_validated_addr &&
+      peer->raw_health.state == DTUN_HEALTH_HEALTHY &&
+      (!peer->direct_activation_after ||
+       time_after_eq(peer->raw_health.last_ack, peer->direct_activation_after));
+  status->udp_up =
+      peer->direct_udp_addr && peer->direct_udp_port &&
+      peer->udp_health.state == DTUN_HEALTH_HEALTHY &&
+      (!peer->direct_activation_after ||
+       time_after_eq(peer->udp_health.last_ack, peer->direct_activation_after));
   status->raw_health = peer->raw_health.state;
   status->udp_health = peer->udp_health.state;
   status->raw_srtt_us = peer->raw_health.srtt_us;
@@ -513,6 +534,7 @@ static int dtun_nl_rebind(struct sk_buff *skb, struct genl_info *info) {
     if (peer->dynamic_raw) {
       peer->raw_validated_addr = 0;
       dtun_path_health_init(&peer->raw_health);
+      dtun_nat_reset(peer);
     }
     spin_unlock_bh(&peer->state_lock);
   }

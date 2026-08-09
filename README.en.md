@@ -22,7 +22,8 @@ weighted majority election for three or more Hubs.
   every peer. The default MTU is 1200.
 - Raw IP as the preferred path, followed by a configured UDP endpoint.
 - Authenticated UDP frames can update the source `IP:port` learned through NAT.
-- Probe cadence and offline thresholds adapt from EWMA/RTTVAR link quality.
+- Spoke direct paths use low-rate state heartbeats; when Raw is selected, both
+  peers learn a safe NAT interval for standby UDP.
 - The DTRG control plane supports lightweight refresh, candidate
   generations, persistent Hub
   state, offline lease expiry, and `/32` direct-peer synchronization between

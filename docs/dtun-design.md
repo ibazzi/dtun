@@ -81,7 +81,9 @@ daemon 不订阅该事件，而是在生成 SYNC 前调用 `PEER_GET` 获取最�
 全 peer 泛洪；没有 peer 时同样丢包。每份副本使用对应 peer 独立的 tunnel ID、序列号、
 HMAC 和路径选择。
 
-自适应 workqueue 按各路径的 EWMA/RTTVAR 探测周期对每个 peer：
+自适应 workqueue 按路径状态为每个 peer 调度探测。Spoke 间初始打洞为 250ms，
+健康且正在承载业务的直连为 1000--1250ms，suspect 时恢复为 250ms，offline 后
+每 2000ms 重新打洞；Hub/HA 的 EWMA/RTTVAR 周期不受影响：
 
 - 有 Raw 地址时发送 Raw PROBE；
 - 有 UDP `IP:port` 时发送 UDP PROBE；
@@ -95,6 +97,18 @@ DATA 的实际选择规则为：
 
 Raw 和直连 UDP 都必须处于活跃窗口。两者失效时使用 Hub peer 的 tunnel ID 和 HMAC
 重新封装，Hub 解包后依靠地址池路由及 IPv4 forwarding 转发到目标 Spoke。
+
+Raw 承载业务且 UDP 仅作备用时，双方用认证扩展 PROBE 学习 NAT 映射存活期。固定网络
+字节序载荷包含 probe ID、校准 epoch、请求静默期、公告安全周期以及 `BEGIN`、
+`CHECK`、`ENDPOINT_CHANGED`、`CALIBRATED` 标志。双方按 NodeID 顺序轮流测试
+5、8、12、18、27、40、60 秒静默；接收方比较 BEGIN 与 CHECK 的认证来源端点。
+安全周期取最后成功阶梯的 75%，并限制在 5--45 秒。双方完成后仅较小 NodeID 定期
+发起备用 UDP 心跳，周期取双方安全值的较小者，另一端只回复；连续缺失两个周期时
+回复端接管。候选 generation、认证端点或路由变化会重置学习，稳定 30 分钟后重新
+校准。校准只暂停备用 UDP，不暂停当前 Raw、Hub 或业务流量。
+
+任一直连进入 suspect 会立即取消静默并先回退 Hub，同时强制验证备用路径。故障前的
+旧健康状态不能直接接管；只有故障发生后的新认证 ACK 才重新允许 Raw 或 UDP 承载数据。
 
 ## 6. 外层发送与生命周期
 

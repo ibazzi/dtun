@@ -14,6 +14,8 @@ A=${PREFIX}a
 B=${PREFIX}b
 BR=${PREFIX}br
 OUT=/tmp/dtun-p2mp
+RAW_TRANSPORT=${RAW_TRANSPORT:-false}
+CALIBRATION_SMOKE=${CALIBRATION_SMOKE:-0}
 
 fail() {
 	echo "dtun p2mp test: $*" >&2
@@ -30,6 +32,7 @@ stop_pid() {
 }
 
 cleanup() {
+	stop_pid "$OUT/heartbeat.pid"
 	stop_pid "$OUT/mcast-hub.pid"
 	stop_pid "$OUT/mcast-b.pid"
 	stop_pid "$OUT/a.pid"
@@ -99,7 +102,7 @@ spoke_config() {
 mode = spoke
 interface = dtun0
 local_outer_ip = 0.0.0.0
-raw_transport = false
+raw_transport = $RAW_TRANSPORT
 data_port = 49000
 node_id = $node
 address = $inner/24
@@ -145,21 +148,83 @@ for i in $(seq 1 25); do
 done
 [ "$direct" = 1 ] || { echo "direct peers not installed" >&2; exit 1; }
 
+expected_path=udp
+[ "$CALIBRATION_SMOKE" = 1 ] && expected_path=raw
 for i in $(seq 1 20); do
 	if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
-		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"udp"' &&
+		--tunnel-id 104 2>/dev/null | grep -q "\"selected_path\":\"$expected_path\"" &&
 	   ip netns exec "$B" "$CTL" peer get --format json --ifname dtun0 \
-		--tunnel-id 105 2>/dev/null | grep -q '"selected_path":"udp"'; then
+		--tunnel-id 105 2>/dev/null | grep -q "\"selected_path\":\"$expected_path\""; then
 		direct=2
 		break
 	fi
 	sleep 1
 done
-[ "$direct" = 2 ] || fail "authenticated UDP direct path did not become active"
+[ "$direct" = 2 ] || fail "authenticated $expected_path direct path did not become active"
 grep -q 'Hole punching started for NodeID=3' "$OUT/a.log" ||
 	fail "Spoke A did not log UDP hole punching"
+
+if [ "$CALIBRATION_SMOKE" = 1 ]; then
+	udp_standby=0
+	for i in $(seq 1 40); do
+		if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
+			--tunnel-id 104 2>/dev/null | grep -q '"udp_up":true' &&
+		   ip netns exec "$B" "$CTL" peer get --format json --ifname dtun0 \
+			--tunnel-id 105 2>/dev/null | grep -q '"udp_up":true'; then
+			udp_standby=1
+			break
+		fi
+		sleep 0.1
+	done
+	[ "$udp_standby" = 1 ] || fail "standby UDP did not authenticate"
+	command -v tcpdump >/dev/null 2>&1 || fail "tcpdump is required"
+	calibration_started=$(date +%s.%N)
+	tcpdump -ni "$BR" -w "$OUT/calibration.pcap" \
+		'udp port 49000 and host 172.30.90.2 and host 172.30.90.3' \
+		> "$OUT/calibration.log" 2>&1 &
+	echo $! > "$OUT/heartbeat.pid"
+	ip netns exec "$A" ping -c 20 -i 0.5 -W 1 10.99.0.3 >/dev/null
+	sleep 3
+	calibration_ended=$(date +%s.%N)
+	kill -INT "$(cat "$OUT/heartbeat.pid")" 2>/dev/null || true
+	wait "$(cat "$OUT/heartbeat.pid")" 2>/dev/null || true
+	rm -f "$OUT/heartbeat.pid"
+	calibration_packets=$(tcpdump -nr "$OUT/calibration.pcap" 2>/dev/null | wc -l)
+	[ "$calibration_packets" -ge 2 ] || fail "calibration BEGIN/ACK not captured"
+	calibration_gap=$(tcpdump -tt -nr "$OUT/calibration.pcap" 2>/dev/null | \
+		awk -v started="$calibration_started" -v ended="$calibration_ended" \
+		'NR == 1 { previous=$1; maximum=previous-started; next }
+		 { gap=$1-previous; if (gap > maximum) maximum=gap; previous=$1 }
+		 END { gap=ended-previous; if (gap > maximum) maximum=gap; printf "%.3f", maximum+0 }')
+	awk -v gap="$calibration_gap" 'BEGIN { exit !(gap >= 4.0) }' ||
+		fail "standby UDP did not enter the 5s calibration silence: ${calibration_gap}s"
+	echo "dtun NAT calibration smoke passed; maximum standby UDP silence ${calibration_gap}s"
+	exit 0
+fi
+
 grep -Eq 'Direct UDP established for|Direct path recovered for.*Direct UDP' \
 	"$OUT/a.log" || fail "Spoke A did not log UDP direct establishment"
+
+# A selected UDP path needs only its 1--1.25 second state heartbeat.  Count
+# only direct A<->B traffic so the independent Hub liveness stream is excluded.
+if command -v tcpdump >/dev/null 2>&1; then
+	tcpdump -ni "$BR" -w "$OUT/heartbeat.pcap" \
+		'udp port 49000 and host 172.30.90.2 and host 172.30.90.3' \
+		> "$OUT/heartbeat.log" 2>&1 &
+	echo $! > "$OUT/heartbeat.pid"
+	sleep 30
+	kill -INT "$(cat "$OUT/heartbeat.pid")" 2>/dev/null || true
+	wait "$(cat "$OUT/heartbeat.pid")" 2>/dev/null || true
+	rm -f "$OUT/heartbeat.pid"
+	heartbeat_packets=$(tcpdump -nr "$OUT/heartbeat.pcap" 2>/dev/null | wc -l)
+	[ "$heartbeat_packets" -ge 60 ] ||
+		fail "too few direct heartbeat packets: $heartbeat_packets"
+	[ "$heartbeat_packets" -le 180 ] ||
+		fail "direct heartbeat rate was not reduced: $heartbeat_packets packets/30s"
+	echo "dtun selected UDP heartbeat count: $heartbeat_packets packets/30s"
+else
+	echo "dtun p2mp test: tcpdump unavailable; heartbeat packet count skipped" >&2
+fi
 
 # Disable inner forwarding: /32 direct routes must continue to work without it.
 ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=0
