@@ -171,7 +171,8 @@ static void dtun_path_note_probe_miss(struct dtun_path_health *health) {
   health->loss_q16 = (u32)div_u64(7ULL * health->loss_q16 + 65536ULL, 8);
   if (health->failed_rounds != U32_MAX)
     health->failed_rounds++;
-  health->state = DTUN_HEALTH_SUSPECT;
+  if (health->state != DTUN_HEALTH_OFFLINE)
+    health->state = DTUN_HEALTH_SUSPECT;
 }
 
 static void dtun_hub_endpoint(struct dtun_dev *d, __be32 *addr, __be16 *port) {
