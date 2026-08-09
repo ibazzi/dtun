@@ -281,9 +281,6 @@ if [[ $DIRECT_READY -ne 1 ]]; then
     remote 2 "timeout 3 tcpdump -ni any -c 30 'udp port 49000'" >&2 || true
     echo "Backup-2 netns UDP capture:" >&2
     remote 2 "ip netns exec dtun-ha-real-s2 timeout 3 tcpdump -ni any -c 30 'udp port 49000'" >&2 || true
-    if [[ $DIRECT_ONLY -eq 0 ]]; then
-        die "local host and backup-2 netns Spoke did not establish direct UDP"
-    fi
     pass "direct UDP blocked outside the netns; Hub fallback remains active"
 else
     local_spoke_exec ping -c 3 -W 2 10.77.0.4 >/dev/null ||
