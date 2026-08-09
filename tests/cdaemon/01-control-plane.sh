@@ -22,6 +22,10 @@ sleep 1
 spoke_conf "$A" "$A_O" "$A_I" 2
 start_spoke "$A"
 wait_reg "$A" 2 && ok "spoke A registered" || fail "spoke A registration"
+sleep 2
+registration_count=$(grep -c 'Registration successful! NodeID=2' "$OUT/spoke-$A.log")
+[ "$registration_count" = 1 ] && ok "initial registration transitions directly to refresh" ||
+	fail "initial registration repeated $registration_count times"
 ping_ok "$A" "$HUB_I" 5 && ok "A -> hub ping" || fail "A -> hub ping"
 
 section "spoke B registration and hub-relayed spoke-to-spoke"

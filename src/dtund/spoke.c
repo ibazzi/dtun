@@ -647,9 +647,9 @@ int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
       dtund_spoke_ha_missed(&spoke_ha, dtun_monotonic_ms());
       dtun_log_err("[dtund Spoke] Registration failed; retaining existing "
                    "link and retrying");
+      if (g_running)
+        sleep(1);
     }
-    if (g_running)
-      sleep(1);
   }
 
 out:
