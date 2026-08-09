@@ -15,6 +15,8 @@
 #define DTRG_REFRESH_ACK 7
 #define DTRG_HUB_LIST 8
 #define DTRG_NOT_LEADER 9
+#define DTRG_LEAVE 10
+#define DTRG_LEAVE_ACK 11
 
 #define DTRG_REFRESH_SNAPSHOT 0x01
 #define DTRG_REFRESH_MORE 0x02
@@ -22,6 +24,7 @@
 #define DTRG_REFRESH_HUB_SWITCH 0x08
 #define DTRG_PEER_ONLINE 0x01
 #define DTRG_PEER_TOMBSTONE 0x02
+#define DTRG_PEER_OFFLINE 0x04
 
 #define DTRG_TAG_LEN 16
 #define DTRG_KEY_LEN 32
@@ -123,6 +126,10 @@ ssize_t dtrg_pack_refresh(const uint8_t *key, uint64_t node_id,
                           const uint8_t *lease_token, uint64_t counter,
                           uint64_t epoch, uint16_t offset, uint8_t *out,
                           size_t max_len);
+
+ssize_t dtrg_pack_leave(const uint8_t *key, uint8_t kind, uint64_t node_id,
+                        const uint8_t *lease_token, uint64_t counter,
+                        uint8_t *out, size_t max_len);
 
 ssize_t dtrg_pack_refresh_ack(
     const uint8_t *key, uint64_t node_id, const uint8_t *lease_token,

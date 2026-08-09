@@ -69,15 +69,22 @@ for spec in "$HUB:1" "$A:2" "$B:3"; do
 done
 ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=1
 
+cat > "$OUT/no-ha.conf" <<EOF
+[ha]
+enabled = false
+EOF
+
 cat > "$OUT/hub.conf" <<EOF
 [global]
 mode = hub
 interface = dtun0
 local_outer_ip = 172.30.90.1
+raw_transport = false
 data_port = 49000
 node_id = 1
 address = 10.99.0.1/24
 psk = $KEY
+ha_config = $OUT/no-ha.conf
 [hub]
 bind_address = 0.0.0.0
 bind_port = 49001
@@ -92,6 +99,7 @@ spoke_config() {
 mode = spoke
 interface = dtun0
 local_outer_ip = 0.0.0.0
+raw_transport = false
 data_port = 49000
 node_id = $node
 address = $inner/24
@@ -137,10 +145,68 @@ for i in $(seq 1 25); do
 done
 [ "$direct" = 1 ] || { echo "direct peers not installed" >&2; exit 1; }
 
+for i in $(seq 1 20); do
+	if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
+		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"udp"' &&
+	   ip netns exec "$B" "$CTL" peer get --format json --ifname dtun0 \
+		--tunnel-id 105 2>/dev/null | grep -q '"selected_path":"udp"'; then
+		direct=2
+		break
+	fi
+	sleep 1
+done
+[ "$direct" = 2 ] || fail "authenticated UDP direct path did not become active"
+grep -q 'Hole punching started for NodeID=3' "$OUT/a.log" ||
+	fail "Spoke A did not log UDP hole punching"
+grep -Eq 'Direct UDP established for|Direct path recovered for.*Direct UDP' \
+	"$OUT/a.log" || fail "Spoke A did not log UDP direct establishment"
+
 # Disable inner forwarding: /32 direct routes must continue to work without it.
 ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=0
 ip netns exec "$A" ping -c 3 -W 2 10.99.0.3
 ip netns exec "$B" ping -c 3 -W 2 10.99.0.2
+
+# Block only the two direct rendezvous endpoints.  Hub forwarding must remain
+# available, then removing the rules must recover authenticated UDP direct.
+ip netns exec "$HUB" sysctl -qw net.ipv4.ip_forward=1
+ip netns exec "$A" iptables -I OUTPUT -p udp -d 172.30.90.3 --dport 49000 -j DROP
+ip netns exec "$B" iptables -I OUTPUT -p udp -d 172.30.90.2 --dport 49000 -j DROP
+fallback=0
+for i in $(seq 1 30); do
+	if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
+		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"hub"'; then
+		fallback=1
+		break
+	fi
+	sleep 0.1
+done
+[ "$fallback" = 1 ] || fail "direct path did not fall back to Hub"
+ip netns exec "$A" ping -c 2 -W 2 10.99.0.3
+for i in $(seq 1 20); do
+	grep -q 'Falling back to Hub for NodeID=3' "$OUT/a.log" && break
+	sleep 0.1
+done
+grep -q 'Falling back to Hub for NodeID=3' "$OUT/a.log" ||
+	fail "Spoke A did not log Hub fallback"
+ip netns exec "$A" iptables -D OUTPUT -p udp -d 172.30.90.3 --dport 49000 -j DROP
+ip netns exec "$B" iptables -D OUTPUT -p udp -d 172.30.90.2 --dport 49000 -j DROP
+recovered=0
+for i in $(seq 1 30); do
+	if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
+		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"udp"'; then
+		recovered=1
+		break
+	fi
+	sleep 0.1
+done
+[ "$recovered" = 1 ] || fail "UDP direct path did not recover"
+for i in $(seq 1 20); do
+	grep -q 'Direct path recovered for NodeID=3 via Direct UDP' "$OUT/a.log" &&
+		break
+	sleep 0.1
+done
+grep -q 'Direct path recovered for NodeID=3 via Direct UDP' "$OUT/a.log" ||
+	fail "Spoke A did not log direct recovery"
 
 # Multicast does not have a single prefix owner.  One packet from A must be
 # replicated to both its Hub peer and its direct B peer.
@@ -169,24 +235,45 @@ rm -f "$OUT/mcast-b.pid"
 grep -qx 'dtun-multicast' "$OUT/mcast-hub.out" || fail "Hub multicast payload mismatch"
 grep -qx 'dtun-multicast' "$OUT/mcast-b.out" || fail "Spoke multicast payload mismatch"
 
-# A stopped Spoke is removed from the Hub's active kernel paths while its
-# stable session remains on the surviving Spoke for identity retention.
-stop_pid "$OUT/b.pid"
-expired=0
-ifh=$(ip -n "$HUB" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
+# A graceful stop removes the Spoke from the Hub and informs surviving Spokes
+# immediately.  Stable identity and session allocations remain persisted.
 hub_b_tunnel=$(ip netns exec "$HUB" "$CTL" peer list --format json \
 	--ifname dtun0 | python3 -c \
 	'import json,sys; print(next(p["tunnel_id"] for p in json.load(sys.stdin) if p["node_id"] == 3))')
-for i in $(seq 1 15); do
+leave_started=$(date +%s%3N)
+stop_pid "$OUT/b.pid"
+expired=0
+for i in $(seq 1 40); do
 	if ! ip netns exec "$HUB" "$CTL" peer get --ifname dtun0 \
 			--tunnel-id "$hub_b_tunnel" >/dev/null 2>&1 &&
-	   ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
-		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"hub"'; then
+	   ! ip netns exec "$A" "$CTL" peer get --ifname dtun0 \
+		--tunnel-id 104 >/dev/null 2>&1; then
 		expired=1
 		break
 	fi
-	sleep 1
+	sleep 0.05
 done
 [ "$expired" = 1 ] || fail "offline Spoke was not removed from Hub active paths"
-grep -q 'Marked Spoke NodeID=3.*offline' "$OUT/hub.log" || fail "Hub did not log Spoke offline"
+leave_elapsed=$(( $(date +%s%3N) - leave_started ))
+[ "$leave_elapsed" -le 2000 ] || fail "graceful offline propagation exceeded 2000ms"
+grep -q 'Marked Spoke NodeID=3.*authenticated graceful LEAVE' "$OUT/hub.log" ||
+	fail "Hub did not log authenticated graceful offline"
+grep -q 'Hub acknowledged graceful offline for NodeID=3' "$OUT/b.log" ||
+	fail "Spoke B did not receive graceful offline acknowledgement"
+grep -q 'Peer NodeID=3 is offline; removing direct peer' "$OUT/a.log" ||
+	fail "Spoke A did not apply explicit offline state"
+
+# Re-registering with the retained identity reinstalls the same pair session.
+ip netns exec "$B" "$DUND" -c "$OUT/b.conf" >> "$OUT/b.log" 2>&1 &
+echo $! > "$OUT/b.pid"
+reused=0
+for i in $(seq 1 40); do
+	if ip netns exec "$A" "$CTL" peer get --format json --ifname dtun0 \
+		--tunnel-id 104 2>/dev/null | grep -q '"node_id":3'; then
+		reused=1
+		break
+	fi
+	sleep 0.1
+done
+[ "$reused" = 1 ] || fail "retained Spoke identity/session was not reused"
 echo "dtun C point-to-multipoint netns regression passed"

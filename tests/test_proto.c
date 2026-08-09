@@ -134,6 +134,21 @@ int main(void) {
         message.epoch == 9 && message.offset == 0);
   dtrg_msg_free(&message);
 
+  length = dtrg_pack_leave(key, DTRG_LEAVE, 2, lease_token, 12, packet,
+                           sizeof(packet));
+  CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
+  CHECK(message.kind == DTRG_LEAVE && message.node_id == 2 &&
+        message.counter == 12 &&
+        memcmp(message.lease_token, lease_token, sizeof(lease_token)) == 0);
+  dtrg_msg_free(&message);
+  length = dtrg_pack_leave(key, DTRG_LEAVE_ACK, 2, lease_token, 12, packet,
+                           sizeof(packet));
+  CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0 &&
+        message.kind == DTRG_LEAVE_ACK && message.counter == 12);
+  dtrg_msg_free(&message);
+  CHECK(dtrg_pack_leave(key, DTRG_REFRESH, 2, lease_token, 12, packet,
+                        sizeof(packet)) < 0);
+
   length = dtrg_pack_refresh_ack(key, 2, lease_token, 11, 10, raw, 41002,
                                  DTRG_REFRESH_SNAPSHOT, 2, 7, "hub-primary",
                                  49000, peers, 2, packet, sizeof(packet));

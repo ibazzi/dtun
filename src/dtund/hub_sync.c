@@ -102,7 +102,9 @@ static int fill_sync_peer(uint64_t requester, uint64_t other_id,
   peer->udp_addr = other->udp_addr;
   peer->udp_port = other->udp_port;
   peer->generation = other->generation;
-  if (other->online && other->udp_addr.s_addr && other->udp_port)
+  if (!other->online)
+    peer->flags = DTRG_PEER_OFFLINE;
+  else if (other->udp_addr.s_addr && other->udp_port)
     peer->flags = DTRG_PEER_ONLINE;
   if (requester == session->first_node) {
     peer->tunnel_id = session->first_tunnel_id;

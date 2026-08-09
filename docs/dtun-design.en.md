@@ -148,6 +148,8 @@ Spoke                         Hub
   |<--- SYNC -------------------|  available direct records for other Spokes
   |---- REFRESH --------------->|  lease token, counter, epoch, page offset
   |<--- REFRESH_ACK ------------|  reflected endpoint and candidate delta/page
+  |---- LEAVE ----------------->|  lease token and monotonic counter
+  |<--- LEAVE_ACK --------------|  persisted graceful-offline state
 ```
 
 | Message | Total length | Key fields |
@@ -159,9 +161,13 @@ Spoke                         Hub
 | SYNC | `47 + 39 × N` B | node, nonce, count, and N peer records |
 | REFRESH | 63 B | node, lease token, counter, epoch, page offset |
 | REFRESH_ACK | `72 + 39 × N` B | reflected endpoint, epoch, flags, and peer records |
+| LEAVE / LEAVE_ACK | 53 B | node, lease token, and monotonic counter |
 
 Each peer record contains the node ID, tunnel IDs, inner address, Raw and UDP
-candidates, generation, and online/tombstone flags. REFRESH_ACK is capped at
+candidates, generation, and online/offline/tombstone flags. Online publishes a
+hole-punch candidate, no flag means online without a complete candidate,
+offline removes the active peer immediately, and tombstone ends identity
+retention. REFRESH_ACK is capped at
 1,200 bytes and paginated. The parser strictly validates
 magic, type, exact length, count, and HMAC.
 
@@ -184,6 +190,8 @@ Each Hub-to-Spoke and Spoke-pair relationship gets distinct bidirectional tunnel
 IDs allocated from 100 and persisted.
 
 The Hub updates adaptive link health after valid CONFIRM and REFRESH messages.
+LEAVE authenticates with the current lease token and a newer monotonic counter;
+the Hub persists the offline state before returning an idempotent LEAVE_ACK.
 After multiple independent failed probe rounds exceed the EWMA/RTTVAR dynamic
 threshold, it removes only the active kernel path and marks the node offline.
 Address and tunnel/session allocations remain for `identity_retention` (86,400
@@ -222,8 +230,10 @@ determine whether Raw enters its active window.
   can cause the interface to be recreated.
 - With `once=true`, the daemon exits after the first attempt: success leaves the
   interface in place, while failure returns nonzero with no retained interface.
-- SIGINT, SIGTERM, and SIGHUP all mean stop; live configuration reload is not
-  implemented.
+- SIGINT, SIGTERM, and SIGHUP all mean stop. A registered Spoke retries an
+  authenticated LEAVE within a bounded adaptive window of at most 900 ms. It
+  still exits when the Hub is unreachable, leaving liveness detection as the
+  fallback. Live configuration reload is not implemented.
 - Before creating a link, the daemon deletes an existing link with the same name
   and assumes exclusive ownership of it.
 
@@ -243,9 +253,8 @@ determine whether Raw enters its active window.
   built from the same source revision; protocol changes require coordinated deployment.
 - Hub state is a versioned local binary structure and is not portable across
   every ABI or architecture.
-- There is no explicit deregistration message. Multiple independent probe
-  failures beyond the dynamic threshold trigger stale cleanup, and other Spokes
-  learn it through periodic SYNC.
+- Normal signal-driven shutdown uses explicit LEAVE. Crashes, network loss, and
+  forced termination still use adaptive stale-path detection.
 - `dtunctl peer list` dumps peer snapshots; reserved `STATS_GET` remains
   unimplemented.
 - The tunnel has no congestion control, PMTU discovery, fragmentation strategy,

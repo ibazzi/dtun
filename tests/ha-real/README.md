@@ -30,6 +30,19 @@ tests/ha-real/run.sh \
   root@<BACKUP2_IP>
 ```
 
+For the focused direct-path and graceful-offline diagnostic, run the local
+Spoke in the host network namespace and stop after that case:
+
+```sh
+sudo HA_REAL_LOCAL_HOST=1 HA_REAL_DIRECT_ONLY=1 \
+  HA_REAL_ALLOW_LOADED=1 tests/ha-real/run.sh \
+  root@<PRIMARY_IP> root@<BACKUP1_IP> root@<BACKUP2_IP>
+```
+
+`HA_REAL_ALLOW_LOADED=1` accepts an already loaded module only for this
+controlled test; the runner still refuses existing dtun interfaces and never
+marks that module for removal.
+
 The two-Hub availability-first direct-pair suite uses only a primary and one
 backup:
 

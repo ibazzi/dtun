@@ -244,6 +244,31 @@ ssize_t dtrg_pack_refresh(const uint8_t *key, uint64_t node_id,
   return (ssize_t)(body_len + DTRG_TAG_LEN);
 }
 
+ssize_t dtrg_pack_leave(const uint8_t *key, uint8_t kind, uint64_t node_id,
+                        const uint8_t *lease_token, uint64_t counter,
+                        uint8_t *out, size_t max_len) {
+  const size_t body_len = 4 + 1 + 8 + DTRG_LEASE_TOKEN_LEN + 8;
+  uint8_t *p = out;
+  uint64_t value;
+
+  if ((kind != DTRG_LEAVE && kind != DTRG_LEAVE_ACK) || !lease_token ||
+      max_len < body_len + DTRG_TAG_LEN)
+    return -1;
+  memcpy(p, DTRG_MAGIC, 4);
+  p += 4;
+  *p++ = kind;
+  value = hton64(node_id);
+  memcpy(p, &value, sizeof(value));
+  p += sizeof(value);
+  memcpy(p, lease_token, DTRG_LEASE_TOKEN_LEN);
+  p += DTRG_LEASE_TOKEN_LEN;
+  value = hton64(counter);
+  memcpy(p, &value, sizeof(value));
+  p += sizeof(value);
+  dtrg_hmac(key, DTRG_KEY_LEN, out, body_len, p);
+  return (ssize_t)(body_len + DTRG_TAG_LEN);
+}
+
 ssize_t dtrg_pack_refresh_ack(
     const uint8_t *key, uint64_t node_id, const uint8_t *lease_token,
     uint64_t counter, uint64_t epoch, struct in_addr observed_addr,
@@ -586,6 +611,21 @@ int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len,
     memcpy(&offset, p, 2);
     msg->offset = ntohs(offset);
     p += 2;
+    return 0;
+  }
+
+  if (kind == DTRG_LEAVE || kind == DTRG_LEAVE_ACK) {
+    uint64_t value;
+
+    if (body_len != 4 + 1 + 8 + DTRG_LEASE_TOKEN_LEN + 8)
+      return -5;
+    memcpy(&value, p, sizeof(value));
+    msg->node_id = ntoh64(value);
+    p += sizeof(value);
+    memcpy(msg->lease_token, p, DTRG_LEASE_TOKEN_LEN);
+    p += DTRG_LEASE_TOKEN_LEN;
+    memcpy(&value, p, sizeof(value));
+    msg->counter = ntoh64(value);
     return 0;
   }
 

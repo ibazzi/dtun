@@ -299,6 +299,27 @@ peer directly observes an authenticated source. When direct paths fail, the
 packet is re-encapsulated with the Hub peer's tunnel ID and HMAC, then forwarded
 according to the inner IPv4 route at the Hub.
 
+A resident Spoke logs path transitions only: `Hole punching started` for a new
+rendezvous candidate, `Direct UDP established` or `Direct Raw established` for
+an authenticated direct path, `Direct path recovered` after recovery, and
+`Direct path degraded` plus `Falling back to Hub` when direct reachability is
+lost. These messages contain NodeID, endpoints, and adaptive health metrics but
+never the PSK, lease token, or HMAC.
+
+On SIGINT, SIGTERM, or SIGHUP, a registered Spoke sends an authenticated LEAVE.
+The Hub persists offline state and removes the active path before acknowledging
+it; other Spokes remove that peer on their next incremental REFRESH. Address,
+NodeID, and tunnel/session allocations remain under `identity_retention`. If the
+Hub is unreachable, the Spoke exits after at most 900 ms and abnormal-offline
+detection remains the fallback.
+
+When a Hub and a network-namespace Spoke share one cloud host, the rendezvous
+port observed by the Hub may be an ephemeral host-NAT mapping. If an external
+PROBE reaches the host's public/private interface but never enters the
+namespace's `eth0`, the fault is in host DNAT/conntrack or the cloud NAT return
+path, not dtun candidate exchange or probe scheduling. Provide a bidirectional
+mapping or a separately reachable public endpoint for that Spoke.
+
 IPv4 multicast is replicated by the sending node to every peer on the link; no
 peer prefix for `224.0.0.0/4` is required. The kernel does not currently track
 IGMP membership, so all configured peers receive a copy. Account for the outer

@@ -124,6 +124,8 @@ Spoke                         Hub
   |<--- SYNC -------------------|  可用的其他 spoke 直连记录
   |---- REFRESH --------------->|  token、计数器、已应用 epoch、分页偏移
   |<--- REFRESH_ACK ------------|  自身端点、epoch、候选增量/快照页
+  |---- LEAVE ----------------->|  lease token、单调计数器
+  |<--- LEAVE_ACK --------------|  已持久化主动离线状态
 ```
 
 | 消息 | 总长度 | 关键字段 |
@@ -135,9 +137,12 @@ Spoke                         Hub
 | SYNC | `47 + 39 × N` B | node、nonce、数量、N 条 peer 记录 |
 | REFRESH | 63 B | node、lease token、计数器、epoch、分页偏移 |
 | REFRESH_ACK | `72 + 39 × N` B | 自身数据端点、epoch、分页标志及候选记录 |
+| LEAVE / LEAVE_ACK | 53 B | node、lease token、单调计数器 |
 
 每条 peer 记录包含 node ID、双向 tunnel ID、内层 IPv4、Raw/UDP 候选、generation
-和在线/tombstone 标志。REFRESH_ACK 限制为 1200 字节并分页；解析器严格检查
+和 online/offline/tombstone 标志。online 表示候选可用于打洞，无标志表示节点在线但
+候选尚不完整，offline 表示立即移除活跃 peer，tombstone 表示身份保留期结束。
+REFRESH_ACK 限制为 1200 字节并分页；解析器严格检查
 magic、类型、精确长度、数量和 HMAC。
 
 Spoke 为每次尝试生成新 nonce，并要求 CHALLENGE/ACK 来自配置的 Hub 控制端点且
@@ -153,7 +158,8 @@ Hub 本地状态带 magic 和格式校验，持久化 cookie 密钥、下一个 
 最多 128 个节点记录及所有已分配 spoke-pair 会话。每个 Hub↔Spoke 和每个 Spoke 对
 都有独立的双向 tunnel ID，分配从 100 开始并持久化。
 
-Hub 根据有效 CONFIRM/REFRESH 更新自适应链路状态。多个独立探测轮次失败并超过
+Hub 根据有效 CONFIRM/REFRESH 更新自适应链路状态。有效 LEAVE 使用当前 lease token
+和更新的单调计数器认证；Hub 保存离线状态后幂等回复 LEAVE_ACK。多个独立探测轮次失败并超过
 EWMA/RTTVAR 动态阈值后，只移除活跃内核路径并标记离线；地址和 tunnel/session ID
 默认继续保留 86400 秒，保留期内相同 node ID 重连会复用原会话。保留期结束后删除
 记录并通过 tombstone 传播。
@@ -179,7 +185,8 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
   `RE_REGISTER` 回复立即触发完整注册并复用持久化身份和 session。分配地址、node、前缀或 Hub
   数据端口变化时，接口可能被重建。
 - `once=true` 在第一次尝试后退出：成功则保留接口，失败则返回非零且不保留接口。
-- SIGINT、SIGTERM 和 SIGHUP 都表示停止；当前没有配置热重载。
+- SIGINT、SIGTERM 和 SIGHUP 都表示停止；已注册 Spoke 会在最长 900ms 的自适应窗口内
+  重试认证 LEAVE。Hub 不可达时仍会退出，并由存活检测兜底。当前没有配置热重载。
 - daemon 创建接口前会删除同名接口，并假定该接口由自身独占管理。
 
 ## 10. 限制与兼容性
@@ -188,12 +195,11 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - 省略 PSK 会启用不安全的零密钥开发模式。
 - 实际端到端路由仅支持 IPv4。
 - Raw IP 253 通常不能穿越 NAT，并可能被运营商或云安全组过滤。
-- UDP 选择目前不以 `udp_up` 为门槛，失效端点不会自动跳到通用外层 relay。
+- 直连 UDP 只在收到认证往返后进入选择窗口；失效时会通过 Hub peer 重新封装。
 - Hub 间接转发依赖宿主 IPv4 forwarding 和 FORWARD 防火墙策略。
 - DTRG 仍在开发中，只支持相同源码版本构建的 C Hub/Spoke；协议调整时必须同步部署
   替换全部控制面节点。
 - Hub 状态是带版本的本地二进制结构，不保证跨 ABI/架构可移植。
-- Hub 没有显式注销消息；多个独立探测失败并超过动态阈值后执行掉线清理，通知随其他
-  Spoke 的周期 SYNC 传播。
+- 正常信号退出使用显式 LEAVE；崩溃、断网和强制终止仍由自适应探测清理。
 - `dtunctl peer list` 通过 Generic Netlink dump 枚举 peer；预留的 `STATS_GET` 尚未实现。
 - 隧道没有拥塞控制、PMTU 发现、分片重组策略或生产级密钥管理。

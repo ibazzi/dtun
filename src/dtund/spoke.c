@@ -6,6 +6,7 @@
 #include <dtun/log.h>
 #include <dtun/netlink.h>
 #include <dtun/proto.h>
+#include <dtun/uapi.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -34,7 +35,13 @@ typedef struct {
   uint64_t node_id;
   uint32_t tunnel_id;
   struct in_addr address;
+  struct in_addr rendezvous_addr;
+  uint16_t rendezvous_port;
   uint64_t generation;
+  int path_initialized;
+  int selected_path;
+  int raw_health;
+  int udp_health;
   int seen;
 } applied_peer_t;
 
@@ -79,6 +86,15 @@ static int apply_peer_item(uint32_t ifindex, const dtrg_sync_peer_t *item,
     delete_applied_node(ifindex, applied, count, item->node_id);
     return 0;
   }
+  if (item->flags & DTRG_PEER_OFFLINE) {
+    if (slot) {
+      dtun_log_info("[dtund Spoke] Peer NodeID=%llu is offline; removing "
+                    "direct peer",
+                    (unsigned long long)item->node_id);
+      delete_applied_node(ifindex, applied, count, item->node_id);
+    }
+    return 0;
+  }
   if (!(item->flags & DTRG_PEER_ONLINE)) {
     if (slot)
       slot->seen = 1;
@@ -112,7 +128,7 @@ static int apply_peer_item(uint32_t ifindex, const dtrg_sync_peer_t *item,
     peer.raw_addr = item->raw;
   peer.udp_addr = item->udp_addr;
   peer.udp_port = item->udp_port;
-  peer.dynamic_raw = 1;
+  peer.dynamic_raw = g_raw_transport;
   peer.has_dynamic_raw = 1;
   peer.candidate_generation = item->generation;
   peer.has_generation = 1;
@@ -122,6 +138,19 @@ static int apply_peer_item(uint32_t ifindex, const dtrg_sync_peer_t *item,
   if (program_peer(&peer) < 0 ||
       program_route(ifindex, item->tunnel_id, item->address, 32) < 0)
     return -1;
+  if (slot->generation != item->generation ||
+      slot->rendezvous_addr.s_addr != item->udp_addr.s_addr ||
+      slot->rendezvous_port != item->udp_port) {
+    char endpoint[INET_ADDRSTRLEN];
+
+    inet_ntop(AF_INET, &item->udp_addr, endpoint, sizeof(endpoint));
+    dtun_log_info("[dtund Spoke] Hole punching started for NodeID=%llu "
+                  "rendezvous=%s:%u generation=%llu",
+                  (unsigned long long)item->node_id, endpoint, item->udp_port,
+                  (unsigned long long)item->generation);
+    slot->rendezvous_addr = item->udp_addr;
+    slot->rendezvous_port = item->udp_port;
+  }
   slot->generation = item->generation;
   slot->seen = 1;
   return 0;
@@ -165,6 +194,142 @@ static int apply_refresh_delta(uint32_t ifindex, const dtrg_msg_t *reply,
                         applied_count) < 0)
       return -1;
   return 0;
+}
+
+static const char *health_name(int state) {
+  static const char *const names[] = {"unknown", "healthy", "suspect",
+                                      "offline"};
+
+  return state >= DTUN_HEALTH_UNKNOWN && state <= DTUN_HEALTH_OFFLINE
+             ? names[state]
+             : "invalid";
+}
+
+static void log_peer_paths(uint32_t ifindex,
+                           const struct sockaddr_in *hub_control,
+                           uint16_t hub_data_port,
+                           applied_peer_t applied[MAX_PEERS], uint16_t count) {
+  uint16_t i;
+
+  for (i = 0; i < count; i++) {
+    applied_peer_t *peer = &applied[i];
+    dtun_nl_peer_status_t status;
+    int was_direct;
+    int is_direct;
+
+    if (dtun_nl_peer_get(ifindex, peer->tunnel_id, &status) < 0)
+      continue;
+    was_direct = peer->selected_path == DTUN_PATH_RAW ||
+                 peer->selected_path == DTUN_PATH_UDP;
+    is_direct = status.selected_path == DTUN_PATH_RAW ||
+                status.selected_path == DTUN_PATH_UDP;
+    if (peer->path_initialized && ((peer->raw_health == DTUN_HEALTH_HEALTHY &&
+                                    status.raw_health >= DTUN_HEALTH_SUSPECT) ||
+                                   (peer->udp_health == DTUN_HEALTH_HEALTHY &&
+                                    status.udp_health >= DTUN_HEALTH_SUSPECT)))
+      dtun_log_warn("[dtund Spoke] Direct path degraded for NodeID=%llu "
+                    "raw=%s udp=%s udp_loss=%uppm threshold=%ums last_ack=%ums",
+                    (unsigned long long)peer->node_id,
+                    health_name(status.raw_health),
+                    health_name(status.udp_health), status.udp_loss_ppm,
+                    status.udp_threshold_ms, status.udp_last_ack_ms);
+    if (!peer->path_initialized ||
+        status.selected_path != peer->selected_path) {
+      if (status.selected_path == DTUN_PATH_RAW) {
+        char endpoint[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &status.raw_validated_addr, endpoint,
+                  sizeof(endpoint));
+        dtun_log_info("[dtund Spoke] %s NodeID=%llu via Direct Raw endpoint=%s "
+                      "rtt=%lluus",
+                      peer->path_initialized &&
+                              peer->selected_path == DTUN_PATH_HUB
+                          ? "Direct path recovered for"
+                          : "Direct Raw established for",
+                      (unsigned long long)peer->node_id, endpoint,
+                      (unsigned long long)status.raw_srtt_us);
+      } else if (status.selected_path == DTUN_PATH_UDP) {
+        char endpoint[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &status.direct_udp_addr, endpoint, sizeof(endpoint));
+        dtun_log_info(
+            "[dtund Spoke] %s NodeID=%llu via Direct UDP endpoint=%s:%u "
+            "rtt=%lluus",
+            peer->path_initialized && peer->selected_path == DTUN_PATH_HUB
+                ? "Direct path recovered for"
+                : "Direct UDP established for",
+            (unsigned long long)peer->node_id, endpoint, status.direct_udp_port,
+            (unsigned long long)status.udp_srtt_us);
+      } else if (status.selected_path == DTUN_PATH_HUB) {
+        char endpoint[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &hub_control->sin_addr, endpoint, sizeof(endpoint));
+        dtun_log_warn("[dtund Spoke] Falling back to Hub for NodeID=%llu "
+                      "hub=%s:%u direct_was_up=%s",
+                      (unsigned long long)peer->node_id, endpoint,
+                      hub_data_port, was_direct ? "yes" : "no");
+      } else if (peer->path_initialized && was_direct && !is_direct) {
+        dtun_log_warn("[dtund Spoke] Direct path unavailable for NodeID=%llu; "
+                      "Hub path is also down",
+                      (unsigned long long)peer->node_id);
+      }
+    }
+    peer->path_initialized = 1;
+    peer->selected_path = status.selected_path;
+    peer->raw_health = status.raw_health;
+    peer->udp_health = status.udp_health;
+  }
+}
+
+static void send_graceful_leave(int sock, const struct sockaddr_in *hub_control,
+                                const uint8_t psk[32], uint64_t node_id,
+                                const uint8_t lease_token[DTRG_LEASE_TOKEN_LEN],
+                                uint64_t counter,
+                                const dtun_liveness_t *leader_health) {
+  uint8_t tx[128], rx[128];
+  uint64_t now_ms = dtun_monotonic_ms();
+  uint64_t deadline_ms = now_ms + dtun_liveness_offline_ms(leader_health);
+  uint32_t rto_ms = dtun_liveness_rto_ms(leader_health);
+  ssize_t packed = dtrg_pack_leave(psk, DTRG_LEAVE, node_id, lease_token,
+                                   counter, tx, sizeof(tx));
+
+  if (packed < 0)
+    return;
+  while ((now_ms = dtun_monotonic_ms()) < deadline_ms) {
+    struct sockaddr_in source;
+    socklen_t source_len = sizeof(source);
+    struct timeval timeout;
+    dtrg_msg_t reply;
+    uint64_t remaining_ms = deadline_ms - now_ms;
+    uint32_t wait_ms = rto_ms < remaining_ms ? rto_ms : (uint32_t)remaining_ms;
+    ssize_t length;
+
+    if (sendto(sock, tx, (size_t)packed, 0,
+               (const struct sockaddr *)hub_control, sizeof(*hub_control)) < 0)
+      break;
+    timeout.tv_sec = wait_ms / 1000;
+    timeout.tv_usec = (suseconds_t)(wait_ms % 1000) * 1000;
+    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    memset(&reply, 0, sizeof(reply));
+    length = recvfrom(sock, rx, sizeof(rx), 0, (struct sockaddr *)&source,
+                      &source_len);
+    if (length > 0 && same_endpoint(&source, hub_control) &&
+        dtrg_parse(psk, rx, (size_t)length, &reply) == 0 &&
+        reply.kind == DTRG_LEAVE_ACK && reply.node_id == node_id &&
+        reply.counter == counter &&
+        CRYPTO_memcmp(reply.lease_token, lease_token, DTRG_LEASE_TOKEN_LEN) ==
+            0) {
+      dtrg_msg_free(&reply);
+      dtun_log_info("[dtund Spoke] Hub acknowledged graceful offline for "
+                    "NodeID=%llu",
+                    (unsigned long long)node_id);
+      return;
+    }
+    dtrg_msg_free(&reply);
+  }
+  dtun_log_warn("[dtund Spoke] Graceful offline was not acknowledged for "
+                "NodeID=%llu; Hub liveness detection remains the fallback",
+                (unsigned long long)node_id);
 }
 
 int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
@@ -406,6 +571,8 @@ int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         refresh_failures = 0;
         dtund_spoke_ha_seen(&spoke_ha, refresh_rtt_us ? refresh_rtt_us : 100000,
                             dtun_monotonic_ms());
+        log_peer_paths(ifindex, &hub_control, hub_data_port, applied,
+                       applied_count);
         result = 0;
         if (config->once)
           break;
@@ -635,6 +802,8 @@ int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
              applied_count);
       fflush(stdout);
     }
+    log_peer_paths(ifindex, &hub_control, hub_data_port, applied,
+                   applied_count);
 
   attempt_done:
     bootstrap_attempted = 1;
@@ -653,6 +822,13 @@ int run_spoke(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
   }
 
 out:
+  if (!g_running && have_lease && ifindex && !config->once) {
+    refresh_counter++;
+    if (!refresh_counter)
+      refresh_counter++;
+    send_graceful_leave(sock, &hub_control, psk, assigned_node, lease_token,
+                        refresh_counter, &spoke_ha.leader_health);
+  }
   if (route_fd >= 0)
     close(route_fd);
   if (sock >= 0)

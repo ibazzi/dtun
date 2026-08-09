@@ -328,6 +328,22 @@ Hub 同步的 rendezvous 地址只用于打洞；只有直接收到认证包后�
 直连不可用时内核改用 Hub peer 重新封装，因此 tunnel ID/HMAC 与 Hub 会话匹配，
 再由 Hub 按内层 IPv4 路由转发。
 
+常驻 Spoke 只在路径状态变化时记录日志：收到新 rendezvous 候选时记录
+`Hole punching started`，认证直连成功时记录 `Direct UDP established` 或
+`Direct Raw established`，路径恢复时记录 `Direct path recovered`，失效并切回 Hub 时
+记录 `Direct path degraded` 和 `Falling back to Hub`。这些日志包含 NodeID、端点和
+自适应健康指标，但不包含 PSK、lease token 或 HMAC。
+
+Spoke 收到 SIGINT、SIGTERM 或 SIGHUP 后会发送认证 LEAVE。Hub 保存离线状态并删除
+活跃路径后回复 ACK，其他 Spoke 在下一次增量 REFRESH 中移除该 peer；地址、NodeID 和
+tunnel/session ID 仍按 `identity_retention` 保留。若 Hub 不可达，Spoke 最多等待
+900ms 后退出，异常离线检测继续兜底。
+
+若 Hub 与 netns Spoke 共用同一云主机，Hub 观测到的 Spoke rendezvous 端口可能是宿主
+NAT 分配的临时端口。外部 PROBE 已到达宿主公网/私网接口、但未进入 netns `eth0` 时，
+故障点是宿主 DNAT/conntrack 或云 NAT 回程，不是 dtun 候选交换或探测调度；需要为该
+映射提供双向回程，或给 Spoke 使用独立可达的公网端点。
+
 IPv4 组播包会由发送节点复制到接口上的所有 peer，不需要为 `224.0.0.0/4` 配置 peer
 前缀。内核当前不跟踪 IGMP 成员关系，所以所有已配置 peer 都会收到副本；节点较多或
 组播流量较大时，需要把这种全量复制产生的外层带宽计入容量规划。应用仍需按常规方式

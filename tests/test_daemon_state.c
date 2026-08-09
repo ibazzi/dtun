@@ -129,6 +129,14 @@ static int hub_state_test(void) {
                                      &next_offset) == 1 &&
         peers[0].node_id == node.node_id && peers[0].generation == 3 &&
         (peers[0].flags & DTRG_PEER_ONLINE));
+  epoch = dtund_hub_candidate_epoch(&hub);
+  CHECK(dtund_hub_update_node(&hub, node.node_id, udp_address, 41003, 4, 0) ==
+        0);
+  memset(peers, 0, sizeof(peers));
+  CHECK(dtund_hub_build_refresh_page(&hub, 2, epoch, 0, peers, &flags,
+                                     &next_offset) == 1 &&
+        peers[0].node_id == node.node_id && peers[0].generation == 4 &&
+        peers[0].flags == DTRG_PEER_OFFLINE);
 
   fd = mkstemp(path);
   CHECK(fd >= 0);

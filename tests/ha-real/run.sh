@@ -9,6 +9,14 @@ CONFIG="$ROOT/tests/ha-real/config"
     exit 2
 }
 HOSTS=("$1" "$2" "$3")
+LOCAL_HOST_MODE=${HA_REAL_LOCAL_HOST:-0}
+DIRECT_ONLY=${HA_REAL_DIRECT_ONLY:-0}
+ALLOW_LOADED=${HA_REAL_ALLOW_LOADED:-0}
+[[ $LOCAL_HOST_MODE =~ ^[01]$ && $DIRECT_ONLY =~ ^[01]$ &&
+   $ALLOW_LOADED =~ ^[01]$ ]] || {
+    echo "HA_REAL_LOCAL_HOST, HA_REAL_DIRECT_ONLY, and HA_REAL_ALLOW_LOADED must be 0 or 1" >&2
+    exit 2
+}
 for host in "${HOSTS[@]}"; do
     [[ $host =~ ^[^[:space:]@]+@([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
         echo "host must be USER@IPv4: $host" >&2; exit 2;
@@ -79,10 +87,20 @@ cleanup_active() {
     remote 2 "systemctl stop dtun-ha-real-spoke-2.service dtun-ha-real-backup-2.service 2>/dev/null || true; bash /tmp/dtun-ha-real-src/tests/ha-real/node-netns.sh cleanup dtun-ha-real-s2 dthar2 192.168.252.0/24 '${b2_out:-eth0}' '$B2_IP' 2>/dev/null || true; test ! -e /tmp/dtun-ha-real/module.loaded || rmmod dtun; rm -rf /tmp/dtun-ha-real /tmp/dtun-ha-real-src /tmp/dtun-ha-real-src.tar.gz /tmp/dtun-ha-real-backup-2.conf /tmp/dtun-ha-real-spoke-2.conf" >/dev/null 2>&1
     remote 0 "systemctl stop dtun-ha-real-primary.service 2>/dev/null || true; test ! -e /tmp/dtun-ha-real/module.loaded || rmmod dtun; rm -rf /tmp/dtun-ha-real /tmp/dtun-ha-real-src /tmp/dtun-ha-real-primary.conf" >/dev/null 2>&1
     sudo systemctl stop dtun-ha-real-local-spoke.service >/dev/null 2>&1 || true
-    sudo bash "$ROOT/tests/ha-real/node-netns.sh" cleanup dtun-ha-real-local dtharl 192.168.250.0/24 "${local_out:-eth0}" >/dev/null 2>&1 || true
+    if [[ $LOCAL_HOST_MODE -eq 0 ]]; then
+        sudo bash "$ROOT/tests/ha-real/node-netns.sh" cleanup dtun-ha-real-local dtharl 192.168.250.0/24 "${local_out:-eth0}" >/dev/null 2>&1 || true
+    fi
     [[ ! -e /tmp/dtun-ha-real/module.loaded ]] || sudo rmmod dtun >/dev/null 2>&1
     sudo rm -rf /tmp/dtun-ha-real /tmp/dtun-ha-real-local-spoke.conf
     set -e
+}
+
+local_spoke_exec() {
+    if [[ $LOCAL_HOST_MODE -eq 1 ]]; then
+        sudo "$@"
+    else
+        sudo ip netns exec dtun-ha-real-local "$@"
+    fi
 }
 
 finish() {
@@ -139,9 +157,18 @@ for i in 0 1 2; do
 done
 CLEANUP_READY=1
 
-if lsmod | grep -q '^dtun '; then die "local dtun module is already loaded; clean it before testing"; fi
+if [[ $ALLOW_LOADED -eq 0 ]] && grep -q '^dtun ' /proc/modules; then
+    die "local dtun module is already loaded; clean it before testing"
+fi
+if ip -details link show type dtun 2>/dev/null | grep -q 'dtun'; then
+    die "local dtun interface already exists"
+fi
 for i in 0 1 2; do
-    remote "$i" "! lsmod | grep -q '^dtun '" || die "dtun module already loaded on ${HOSTS[$i]}"
+    if [[ $ALLOW_LOADED -eq 0 ]]; then
+        remote "$i" "! grep -q '^dtun ' /proc/modules" || die "dtun module already loaded on ${HOSTS[$i]}"
+    fi
+    remote "$i" "! ip -details link show type dtun 2>/dev/null | grep -q 'dtun'" ||
+        die "dtun interface already exists on ${HOSTS[$i]}"
 done
 
 section "Build and deploy"
@@ -168,10 +195,12 @@ remote 2 "mv /tmp/hub-backup-2.conf /tmp/dtun-ha-real-backup-2.conf; mv /tmp/spo
 sudo cp "$RUN/spoke-local.conf" /tmp/dtun-ha-real-local-spoke.conf
 
 sudo mkdir -p /tmp/dtun-ha-real
-sudo insmod "$ROOT/build/dtun.ko"
-sudo touch /tmp/dtun-ha-real/module.loaded
+if ! grep -q '^dtun ' /proc/modules; then
+    sudo insmod "$ROOT/build/dtun.ko"
+    sudo touch /tmp/dtun-ha-real/module.loaded
+fi
 for i in 0 1 2; do
-    remote "$i" "mkdir -p /tmp/dtun-ha-real; insmod /tmp/dtun-ha-real-src/build/dtun.ko; touch /tmp/dtun-ha-real/module.loaded"
+    remote "$i" "mkdir -p /tmp/dtun-ha-real; if ! grep -q '^dtun ' /proc/modules; then insmod /tmp/dtun-ha-real-src/build/dtun.ko; touch /tmp/dtun-ha-real/module.loaded; fi"
 done
 
 section "Initialize and enroll"
@@ -204,11 +233,17 @@ section "Create isolated Spokes"
 LOCAL_OUT=$(ip route get "$PRIMARY_IP" | awk '/ dev / {for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
 B1_OUT=$(remote 1 "ip route get '$PRIMARY_IP' | awk '/ dev / {for(i=1;i<=NF;i++)if(\$i==\"dev\"){print \$(i+1);exit}}'")
 B2_OUT=$(remote 2 "ip route get '$PRIMARY_IP' | awk '/ dev / {for(i=1;i<=NF;i++)if(\$i==\"dev\"){print \$(i+1);exit}}'")
-sudo bash "$ROOT/tests/ha-real/node-netns.sh" setup dtun-ha-real-local dtharl 192.168.250.0/24 "$LOCAL_OUT"
+if [[ $LOCAL_HOST_MODE -eq 0 ]]; then
+    sudo bash "$ROOT/tests/ha-real/node-netns.sh" setup dtun-ha-real-local dtharl 192.168.250.0/24 "$LOCAL_OUT"
+fi
 remote 1 "bash /tmp/dtun-ha-real-src/tests/ha-real/node-netns.sh setup dtun-ha-real-s1 dthar1 192.168.251.0/24 '$B1_OUT' '$B1_IP'"
 remote 2 "bash /tmp/dtun-ha-real-src/tests/ha-real/node-netns.sh setup dtun-ha-real-s2 dthar2 192.168.252.0/24 '$B2_OUT' '$B2_IP'"
 
-sudo systemd-run --unit=dtun-ha-real-local-spoke --collect /usr/sbin/ip netns exec dtun-ha-real-local "$ROOT/build/dtund" -c /tmp/dtun-ha-real-local-spoke.conf
+if [[ $LOCAL_HOST_MODE -eq 1 ]]; then
+    sudo systemd-run --unit=dtun-ha-real-local-spoke --collect "$ROOT/build/dtund" -c /tmp/dtun-ha-real-local-spoke.conf
+else
+    sudo systemd-run --unit=dtun-ha-real-local-spoke --collect /usr/sbin/ip netns exec dtun-ha-real-local "$ROOT/build/dtund" -c /tmp/dtun-ha-real-local-spoke.conf
+fi
 remote 1 "systemd-run --unit=dtun-ha-real-spoke-1 --collect /usr/sbin/ip netns exec dtun-ha-real-s1 /tmp/dtun-ha-real-src/build/dtund -c /tmp/dtun-ha-real-spoke-1.conf"
 remote 2 "systemd-run --unit=dtun-ha-real-spoke-2 --collect /usr/sbin/ip netns exec dtun-ha-real-s2 /tmp/dtun-ha-real-src/build/dtund -c /tmp/dtun-ha-real-spoke-2.conf"
 wait_local_log dtun-ha-real-local-spoke.service 'Registration successful! NodeID=2' || die "local Spoke registration"
@@ -216,14 +251,75 @@ wait_remote_log 1 "backup-1 netns Spoke registered" dtun-ha-real-spoke-1.service
 wait_remote_log 2 "backup-2 netns Spoke registered" dtun-ha-real-spoke-2.service 'Registration successful! NodeID=4'
 
 section "Data plane and replication"
-sudo ip netns exec dtun-ha-real-local ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke to Hub"
+local_spoke_exec ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke to Hub"
 remote 1 "ip netns exec dtun-ha-real-s1 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-1 to Hub"
 remote 2 "ip netns exec dtun-ha-real-s2 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-2 to Hub"
 pass "all Spokes reach active Hub"
-sudo ip netns exec dtun-ha-real-local ping -c 3 -W 2 10.77.0.3 >/dev/null || die "local to Spoke-1 relay"
+local_spoke_exec ping -c 3 -W 2 10.77.0.3 >/dev/null || die "local to Spoke-1 relay"
 remote 1 "ip netns exec dtun-ha-real-s1 ping -c 3 -W 2 10.77.0.4 >/dev/null" || die "Spoke-1 to Spoke-2 relay"
 remote 2 "ip netns exec dtun-ha-real-s2 ping -c 3 -W 2 10.77.0.2 >/dev/null" || die "Spoke-2 to local relay"
 pass "cross-Spoke UDP/Hub fallback works"
+
+section "Local host to backup-2 netns direct path"
+DIRECT_READY=0
+for ((i=0; i<60; i++)); do
+    LOCAL_PEERS=$(local_spoke_exec "$ROOT/build/dtunctl" peer list --format json --ifname dtun-ha0 2>/dev/null || true)
+    B2_PEERS=$(remote 2 "ip netns exec dtun-ha-real-s2 /tmp/dtun-ha-real-src/build/dtunctl peer list --format json --ifname dtun-ha0" 2>/dev/null || true)
+    if grep -q '"node_id":4.*"selected_path":"udp"' <<<"$LOCAL_PEERS" &&
+       grep -q '"node_id":2.*"selected_path":"udp"' <<<"$B2_PEERS"; then
+        DIRECT_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [[ $DIRECT_READY -ne 1 ]]; then
+    echo "Local peer state: $LOCAL_PEERS" >&2
+    echo "Backup-2 netns peer state: $B2_PEERS" >&2
+    echo "Local UDP capture:" >&2
+    local_spoke_exec timeout 3 tcpdump -ni any -c 30 'udp port 49000' >&2 || true
+    echo "Backup-2 host UDP capture:" >&2
+    remote 2 "timeout 3 tcpdump -ni any -c 30 'udp port 49000'" >&2 || true
+    echo "Backup-2 netns UDP capture:" >&2
+    remote 2 "ip netns exec dtun-ha-real-s2 timeout 3 tcpdump -ni any -c 30 'udp port 49000'" >&2 || true
+    if [[ $DIRECT_ONLY -eq 0 ]]; then
+        die "local host and backup-2 netns Spoke did not establish direct UDP"
+    fi
+    pass "direct UDP blocked outside the netns; Hub fallback remains active"
+else
+    local_spoke_exec ping -c 3 -W 2 10.77.0.4 >/dev/null ||
+        die "local host to backup-2 netns direct data path"
+    pass "local host and backup-2 netns selected authenticated UDP direct"
+fi
+
+if [[ $DIRECT_ONLY -eq 1 ]]; then
+    LOCAL_INVOCATION=$(sudo systemctl show -p InvocationID --value dtun-ha-real-local-spoke.service)
+    LEAVE_STARTED_MS=$(date +%s%3N)
+    sudo systemctl stop dtun-ha-real-local-spoke.service
+    OFFLINE_PROPAGATED=0
+    for ((i=0; i<40; i++)); do
+        PRIMARY_PEERS=$(remote 0 "/tmp/dtun-ha-real-src/build/dtunctl peer list --format json --ifname dtun-ha0" 2>/dev/null || true)
+        B2_PEERS=$(remote 2 "ip netns exec dtun-ha-real-s2 /tmp/dtun-ha-real-src/build/dtunctl peer list --format json --ifname dtun-ha0" 2>/dev/null || true)
+        if ! grep -q '"node_id":2' <<<"$PRIMARY_PEERS" &&
+           ! grep -q '"node_id":2' <<<"$B2_PEERS"; then
+            OFFLINE_PROPAGATED=1
+            break
+        fi
+        sleep 0.05
+    done
+    LEAVE_ELAPSED_MS=$(( $(date +%s%3N) - LEAVE_STARTED_MS ))
+    [[ $OFFLINE_PROPAGATED -eq 1 && $LEAVE_ELAPSED_MS -le 2000 ]] ||
+        die "graceful offline propagation exceeded 2000ms"
+    sudo journalctl "_SYSTEMD_INVOCATION_ID=$LOCAL_INVOCATION" --no-pager -o cat |
+        grep -q 'Hub acknowledged graceful offline for NodeID=2' ||
+        die "local Spoke did not receive LEAVE_ACK"
+    wait_remote_log 0 "primary recorded authenticated graceful leave" \
+        dtun-ha-real-primary.service \
+        'Marked Spoke NodeID=2.*authenticated graceful LEAVE' 3
+    pass "graceful offline propagated in ${LEAVE_ELAPSED_MS}ms"
+    pass "direct-path diagnostic suite complete"
+    exit 0
+fi
+
 for ((i=0; i<15; i++)); do
     H0=$(remote 0 "sha256sum /tmp/dtun-ha-real/primary-hub.state | awk '{print \$1}'")
     H1=$(remote 1 "sha256sum /tmp/dtun-ha-real/backup-1-hub.state | awk '{print \$1}'")
@@ -239,8 +335,8 @@ FAILOVER_START_MS=$(date +%s%3N)
 remote 0 "systemctl stop dtun-ha-real-primary.service"
 MIGRATION_MS=
 while (( $(date +%s%3N) - FAILOVER_START_MS <= 2000 )); do
-    if sudo timeout 0.2s ip netns exec dtun-ha-real-local \
-        ping -c 1 -W 1 10.77.0.1 >/dev/null 2>&1; then
+    if local_spoke_exec timeout 0.2s ping -c 1 -W 1 10.77.0.1 \
+        >/dev/null 2>&1; then
         MIGRATION_MS=$(( $(date +%s%3N) - FAILOVER_START_MS ))
         break
     fi
@@ -249,7 +345,7 @@ done
 [[ -n $MIGRATION_MS ]] || die "local Spoke migration exceeded 2000ms"
 pass "local Spoke data plane migrated in ${MIGRATION_MS}ms"
 wait_remote 1 "backup-1 elected by weight" "/tmp/dtun-ha-real-src/build/dtunctl ha status --state-file /tmp/dtun-ha-real/ha/state | grep -q 'Leader: hub-backup-1'" 20
-sudo ip netns exec dtun-ha-real-local ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke did not migrate"
+local_spoke_exec ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke did not migrate"
 remote 1 "ip netns exec dtun-ha-real-s1 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-1 did not migrate"
 remote 2 "ip netns exec dtun-ha-real-s2 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-2 did not migrate"
 pass "all Spokes migrated to backup-1"
@@ -271,7 +367,7 @@ wait_remote 0 "primary recovered as standby" "/tmp/dtun-ha-real-src/build/dtunct
 remote 1 "systemctl stop dtun-ha-real-backup-1.service"
 wait_remote 0 "highest-weight primary elected" "/tmp/dtun-ha-real-src/build/dtunctl ha status --state-file /tmp/dtun-ha-real/ha/state | grep -q 'Leader: hub-primary'" 25
 sleep 6
-sudo ip netns exec dtun-ha-real-local ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke after second election"
+local_spoke_exec ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke after second election"
 remote 1 "ip netns exec dtun-ha-real-s1 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-1 after second election"
 remote 2 "ip netns exec dtun-ha-real-s2 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-2 after second election"
 remote 1 "systemd-run --unit=dtun-ha-real-backup-1 --collect /tmp/dtun-ha-real-src/build/dtund -c /tmp/dtun-ha-real-backup-1.conf"

@@ -599,6 +599,48 @@ void hub_remove_node_at(uint32_t index) {
          sizeof(g_hub_node_health[0]));
 }
 
+static int hub_mark_node_offline(uint32_t ifindex, hub_node_record_t *node,
+                                 const char *reason, uint32_t threshold_ms) {
+  uint64_t node_id;
+  uint32_t tunnel_id;
+  struct in_addr address;
+  int err;
+
+  if (!node || !node->online)
+    return 0;
+  node_id = node->node_id;
+  tunnel_id = node->hub_tunnel_id;
+  address = node->address;
+  err = dtun_nl_peer_del(ifindex, tunnel_id);
+  if (err < 0 && err != -ENOENT) {
+    dtun_log_err("[dtund Hub] Failed to remove Spoke NodeID=%llu: %s",
+                 (unsigned long long)node_id, strerror(-err));
+    return -1;
+  }
+  (void)dtun_nl_route_del(ifindex, tunnel_id, address, 32);
+  node->online = 0;
+  node->offline_since = time(NULL);
+  node->generation++;
+  if (!node->generation)
+    node->generation++;
+  hub_note_change(node_id);
+  {
+    char text[INET_ADDRSTRLEN];
+
+    inet_ntop(AF_INET, &address, text, sizeof(text));
+    if (threshold_ms)
+      dtun_log_info("[dtund Hub] Marked Spoke NodeID=%llu InnerIP=%s offline "
+                    "after adaptive threshold %ums",
+                    (unsigned long long)node_id, text, threshold_ms);
+    else
+      dtun_log_info("[dtund Hub] Marked Spoke NodeID=%llu InnerIP=%s offline "
+                    "after authenticated %s",
+                    (unsigned long long)node_id, text,
+                    reason ? reason : "request");
+  }
+  return 1;
+}
+
 static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
   time_t now = time(NULL);
   uint64_t now_ms = dtun_monotonic_ms();
@@ -609,11 +651,6 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
 
   while (i < g_hub_state.node_count) {
     hub_node_record_t *node = &g_hub_state.nodes[i];
-    uint64_t node_id;
-    uint32_t tunnel_id;
-    struct in_addr address;
-    int err;
-
     if (!node->online) {
       if (node->offline_since > 0 && now >= node->offline_since &&
           now - node->offline_since > retention) {
@@ -644,34 +681,11 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
       i++;
       continue;
     }
-    node_id = node->node_id;
-    tunnel_id = node->hub_tunnel_id;
-    address = node->address;
-    err = dtun_nl_peer_del(ifindex, tunnel_id);
-    if (err < 0 && err != -ENOENT) {
-      fprintf(stderr,
-              "[dtund Hub] Failed to remove expired Spoke NodeID=%llu: %s\n",
-              (unsigned long long)node_id, strerror(-err));
+    if (hub_mark_node_offline(ifindex, node, NULL, offline_ms) < 0) {
       i++;
       continue;
     }
-    (void)dtun_nl_route_del(ifindex, tunnel_id, address, 32);
-    node->online = 0;
-    node->offline_since = now;
-    node->generation++;
-    if (!node->generation)
-      node->generation++;
-    hub_note_change(node_id);
     changed = 1;
-    {
-      char text[INET_ADDRSTRLEN];
-
-      inet_ntop(AF_INET, &address, text, sizeof(text));
-      printf("[dtund Hub] Marked Spoke NodeID=%llu InnerIP=%s offline "
-             "after adaptive threshold %ums\n",
-             (unsigned long long)node_id, text, offline_ms);
-      fflush(stdout);
-    }
     i++;
   }
   if (changed && hub_save_state(config->state_file) < 0)
@@ -770,10 +784,11 @@ int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     peer.tunnel_id = record->hub_tunnel_id;
     peer.remote_tunnel_id = record->tunnel_id;
     peer.node_id = record->node_id;
-    peer.raw_addr = record->raw;
+    if (g_raw_transport)
+      peer.raw_addr = record->raw;
     peer.udp_addr = record->udp_addr;
     peer.udp_port = record->udp_port ? record->udp_port : data_port;
-    peer.dynamic_raw = 1;
+    peer.dynamic_raw = g_raw_transport;
     peer.has_dynamic_raw = 1;
     peer.candidate_generation = record->generation;
     peer.has_generation = 1;
@@ -1001,11 +1016,12 @@ int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         peer.tunnel_id = record->hub_tunnel_id;
         peer.remote_tunnel_id = record->tunnel_id;
         peer.node_id = record->node_id;
-        peer.raw_addr = record->raw.s_addr ? record->raw : source.sin_addr;
+        if (g_raw_transport)
+          peer.raw_addr = record->raw.s_addr ? record->raw : source.sin_addr;
         peer.udp_addr =
             record->udp_addr.s_addr ? record->udp_addr : source.sin_addr;
         peer.udp_port = record->udp_port ? record->udp_port : data_port;
-        peer.dynamic_raw = 1;
+        peer.dynamic_raw = g_raw_transport;
         peer.has_dynamic_raw = 1;
         peer.candidate_generation = record->generation;
         peer.has_generation = 1;
@@ -1131,7 +1147,36 @@ int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         if (hub_save_state(config->state_file) == 0)
           g_hub_state_dirty = 0;
       }
+    } else if (message.kind == DTRG_LEAVE) {
+      hub_node_record_t *record = node_by_id(message.node_id);
+      ssize_t packed;
+      int changed = 0;
+
+      if (!record || !message.counter ||
+          CRYPTO_memcmp(record->lease_token, message.lease_token,
+                        sizeof(record->lease_token)) != 0)
+        goto message_done;
+      if (record->online) {
+        if (message.counter <= record->refresh_counter)
+          goto message_done;
+        record->refresh_counter = message.counter;
+        changed = hub_mark_node_offline(ifindex, record, "graceful LEAVE", 0);
+        if (changed < 0)
+          goto message_done;
+      } else if (message.counter != record->refresh_counter) {
+        goto message_done;
+      }
+      if (hub_save_state(config->state_file) < 0)
+        goto message_done;
+      g_hub_state_dirty = 0;
+      packed =
+          dtrg_pack_leave(psk, DTRG_LEAVE_ACK, record->node_id,
+                          record->lease_token, message.counter, tx, sizeof(tx));
+      if (packed > 0)
+        (void)sendto(sock, tx, (size_t)packed, 0, (struct sockaddr *)&source,
+                     source_len);
     }
+  message_done:
     dtrg_msg_free(&message);
     (void)hub_expire_nodes(config, ifindex);
   }
