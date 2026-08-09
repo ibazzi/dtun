@@ -17,6 +17,11 @@
 #define DTUN_HA_STATE_VERSION 1U
 
 enum dtun_ha_role { DTUN_HA_LEARNER = 0, DTUN_HA_VOTER = 1 };
+enum dtun_ha_member_state {
+  DTUN_HA_MEMBER_ACTIVE = 0,
+  DTUN_HA_MEMBER_DISABLED = 1,
+  DTUN_HA_MEMBER_EVICTED = 2
+};
 
 typedef struct {
   char hub_id[DTUN_HA_ID_LEN];
@@ -28,6 +33,7 @@ typedef struct {
   uint16_t weight;
   uint8_t role;
   uint8_t enabled;
+  uint8_t lifecycle;
   uint64_t endpoint_generation;
   uint64_t match_index;
 } dtun_ha_member_t;
@@ -45,6 +51,7 @@ typedef struct {
 typedef struct {
   uint8_t cluster_id[DTUN_HA_CLUSTER_ID_LEN];
   char local_hub_id[DTUN_HA_ID_LEN];
+  char primary_hub_id[DTUN_HA_ID_LEN];
   char leader_id[DTUN_HA_ID_LEN];
   uint64_t term;
   uint64_t commit_index;
@@ -70,6 +77,7 @@ int dtun_ha_state_load(const char *path, dtun_ha_state_t *state);
 int dtun_ha_state_save(const char *path, const dtun_ha_state_t *state);
 int dtun_ha_state_lock(const char *path);
 void dtun_ha_state_unlock(int lock_fd);
+int dtun_ha_runtime_lock(const char *path, int nonblock);
 dtun_ha_member_t *dtun_ha_member_find(dtun_ha_state_t *state,
                                       const char *hub_id);
 int dtun_ha_identity_generate(const char *private_path,

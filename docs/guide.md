@@ -266,11 +266,30 @@ Hub 从认证连接和控制/数据探测包自动记录实际端点。不可从
 
 ```sh
 dtunctl ha status
+dtunctl ha status --format json
 dtunctl ha members
 dtunctl ha invite list
 dtunctl ha member set-weight --hub-id hub-backup-1 --weight 950
+dtunctl ha member disable --hub-id hub-backup-1
+dtunctl ha member enable --hub-id hub-backup-1
+dtunctl ha member kick --hub-id hub-backup-1
 dtunctl ha failback
 ```
+
+`status` 会显示固定 Primary、当前 Leader、本机的配置与运行角色、quorum、复制进度，
+并以 `online`、`offline`、`unknown` 或 `disabled` 标记成员。成员管理只能由固定
+Primary 发起；`kick` 永久撤销旧身份，原来的 `member remove` 命令不再支持。目标
+离线时 disable/kick 默认拒绝，显式 `--force` 会产生隔离旧节点继续运行的风险。
+
+备 Hub停止 `dtund` 且处于 Standby 后，可执行 `dtunctl ha leave` 主动退出并清理
+本机 HA 文件。完全重建固定 Primary 时先停止 `dtund`，再执行：
+
+```sh
+sudo dtunctl ha rebuild --force
+sudo systemctl start dtund
+```
+
+重建会轮换集群 ID和身份密钥；全部旧邀请与备 Hub身份失效，Hub业务状态不清除。
 
 新增地址、node ID 和 tunnel/session ID 只有同步到备机（多节点时为多数派）后才
 确认。direct-pair 隔离期间已有链路和已有身份重连继续工作，但在调用分配器前拒绝
@@ -328,11 +347,13 @@ dmesg | grep -i dtun
 已知本地 tunnel ID 时可查询候选和活跃状态：
 
 ```sh
-IFINDEX=$(cat /sys/class/net/dtun0/ifindex)
-sudo ./bin/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
-sudo ./bin/dtunctl peer-list --ifindex "$IFINDEX"
-sudo ./bin/dtunctl peer-list --ifindex "$IFINDEX" --format json
+sudo ./bin/dtunctl peer-get --ifname dtun0 --tunnel-id 100
+sudo ./bin/dtunctl peer-list --ifname dtun0
+sudo ./bin/dtunctl peer-list --format json
 ```
+
+所有 peer 命令使用接口名而不是 ifindex。无参数 `peer-list` 会枚举全部 dtun
+接口并合并结果；JSON 中使用 `ifname` 字段。
 
 `peer-get` 必须提供本地 tunnel ID；`peer-list` 使用 Netlink multipart dump 返回一致
 快照。peer 命令默认输出人类可读信息，自动化应显式使用 `--format json`。

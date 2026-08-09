@@ -9,6 +9,20 @@ typedef struct {
   struct in_addr observed_address;
 } dtun_ha_join_peer_t;
 
+enum dtun_ha_admin_action {
+  DTUN_HA_ADMIN_STATUS = 0,
+  DTUN_HA_ADMIN_DISABLE = 1,
+  DTUN_HA_ADMIN_ENABLE = 2,
+  DTUN_HA_ADMIN_KICK = 3,
+  DTUN_HA_ADMIN_LEAVE = 4
+};
+
+typedef struct {
+  uint8_t status;
+  uint64_t term;
+  uint64_t commit_index;
+} dtun_ha_admin_reply_t;
+
 int dtun_ha_join_client(
     struct in_addr leader, uint16_t port, const dtun_ha_invite_t *invite,
     const uint8_t invite_secret[DTUN_HA_SECRET_LEN],
@@ -23,5 +37,12 @@ int dtun_ha_join_client_fd(
 int dtun_ha_join_server(int fd, dtun_ha_state_t *state, const char *state_path,
                         const char *identity_key_path,
                         const char *configuration, dtun_ha_join_peer_t *peer);
+int dtun_ha_admin_client(struct in_addr address, uint16_t port,
+                         const dtun_ha_state_t *state,
+                         const char *identity_key_path, uint8_t action,
+                         const char *target_hub_id, int force,
+                         dtun_ha_admin_reply_t *reply);
+int dtun_ha_admin_server(int fd, dtun_ha_state_t *state, const char *state_path,
+                         const char *identity_key_path);
 
 #endif

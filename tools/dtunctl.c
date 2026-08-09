@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,17 +135,22 @@ static void print_json_string_or_null(const char *value) {
     printf("null");
 }
 
+static const char *peer_ifname(const dtun_nl_peer_status_t *s,
+                               char name[IF_NAMESIZE]) {
+  return if_indextoname(s->ifindex, name) ? name : "unknown";
+}
+
 static void print_peer_json(const dtun_nl_peer_status_t *s) {
   char raw_candidate[INET_ADDRSTRLEN], raw_validated[INET_ADDRSTRLEN];
-  char rendezvous[64], direct[64];
+  char rendezvous[64], direct[64], ifname[IF_NAMESIZE];
   const char *raw = address_text(s->raw_addr, raw_candidate);
   const char *validated = address_text(s->raw_validated_addr, raw_validated);
   endpoint_text(s->udp_addr, s->udp_port, rendezvous, sizeof(rendezvous));
   endpoint_text(s->direct_udp_addr, s->direct_udp_port, direct, sizeof(direct));
-  printf("{\"ifindex\":%u,\"tunnel_id\":%u,\"remote_tunnel_id\":%u,"
+  printf("{\"ifname\":\"%s\",\"tunnel_id\":%u,\"remote_tunnel_id\":%u,"
          "\"node_id\":%llu,\"candidate_generation\":%llu,"
          "\"dynamic_raw\":%s,\"raw_candidate\":",
-         s->ifindex, s->tunnel_id, s->remote_tunnel_id,
+         peer_ifname(s, ifname), s->tunnel_id, s->remote_tunnel_id,
          (unsigned long long)s->node_id,
          (unsigned long long)s->candidate_generation,
          s->dynamic_raw ? "true" : "false");
@@ -172,10 +178,10 @@ static void print_peer_json(const dtun_nl_peer_status_t *s) {
 
 static void print_peer_human(const dtun_nl_peer_status_t *s) {
   char raw[INET_ADDRSTRLEN], validated[INET_ADDRSTRLEN];
-  char rendezvous[64], direct[64];
+  char rendezvous[64], direct[64], ifname[IF_NAMESIZE];
   endpoint_text(s->udp_addr, s->udp_port, rendezvous, sizeof(rendezvous));
   endpoint_text(s->direct_udp_addr, s->direct_udp_port, direct, sizeof(direct));
-  printf("Interface:             %u\n", s->ifindex);
+  printf("Interface:             %s\n", peer_ifname(s, ifname));
   printf("Tunnel ID:            %u\n", s->tunnel_id);
   printf("Remote tunnel ID:     %u\n", s->remote_tunnel_id);
   printf("Node ID:              %llu\n", (unsigned long long)s->node_id);
@@ -204,24 +210,31 @@ static void print_peer_human(const dtun_nl_peer_status_t *s) {
 
 static int compare_peer(const void *left, const void *right) {
   const dtun_nl_peer_status_t *a = left, *b = right;
+  char aname[IF_NAMESIZE], bname[IF_NAMESIZE];
+  int names = strcmp(peer_ifname(a, aname), peer_ifname(b, bname));
+
+  if (names)
+    return names;
   return a->tunnel_id < b->tunnel_id ? -1 : a->tunnel_id > b->tunnel_id;
 }
 
 static void print_peer_list_human(dtun_nl_peer_status_t *items, size_t count) {
   size_t i;
-  printf("%-8s %-8s %-8s %-6s %-15s %-25s %-25s %s\n", "TUNNEL", "REMOTE",
-         "NODE", "PATH", "RAW", "DIRECT-UDP", "RENDEZVOUS-UDP", "GEN");
+  printf("%-16s %-8s %-8s %-8s %-6s %-15s %-25s %-25s %s\n", "IFNAME", "TUNNEL",
+         "REMOTE", "NODE", "PATH", "RAW", "DIRECT-UDP", "RENDEZVOUS-UDP",
+         "GEN");
   if (!count) {
     printf("No peers.\n");
     return;
   }
   for (i = 0; i < count; i++) {
-    char raw[INET_ADDRSTRLEN], direct[64], rendezvous[64];
+    char raw[INET_ADDRSTRLEN], direct[64], rendezvous[64], ifname[IF_NAMESIZE];
     endpoint_text(items[i].direct_udp_addr, items[i].direct_udp_port, direct,
                   sizeof(direct));
     endpoint_text(items[i].udp_addr, items[i].udp_port, rendezvous,
                   sizeof(rendezvous));
-    printf("%-8u %-8u %-8llu %-6s %-15s %-25s %-25s %llu\n", items[i].tunnel_id,
+    printf("%-16s %-8u %-8u %-8llu %-6s %-15s %-25s %-25s %llu\n",
+           peer_ifname(&items[i], ifname), items[i].tunnel_id,
            items[i].remote_tunnel_id, (unsigned long long)items[i].node_id,
            path_name(items[i].selected_path),
            address_text(items[i].raw_addr, raw) ?: "-", direct, rendezvous,
@@ -230,21 +243,22 @@ static void print_peer_list_human(dtun_nl_peer_status_t *items, size_t count) {
 }
 
 static int command_result(const char *action, enum output_format format,
-                          uint32_t ifindex, uint32_t tunnel_id, int result) {
+                          const char *ifname, uint32_t tunnel_id, int result) {
   if (format == FORMAT_JSON) {
     if (!result)
-      printf("{\"action\":\"%s\",\"success\":true,\"ifindex\":%u,\"tunnel_id\":"
-             "%u}\n",
-             action, ifindex, tunnel_id);
+      printf(
+          "{\"action\":\"%s\",\"success\":true,\"ifname\":\"%s\",\"tunnel_id\":"
+          "%u}\n",
+          action, ifname ? ifname : "", tunnel_id);
     else
-      printf("{\"action\":\"%s\",\"success\":false,\"ifindex\":%u,\"tunnel_"
+      printf("{\"action\":\"%s\",\"success\":false,\"ifname\":\"%s\",\"tunnel_"
              "id\":%u,"
              "\"error\":{\"code\":%d,\"name\":\"%s\",\"message\":\"%s\"}}\n",
-             action, ifindex, tunnel_id, result, error_name(result),
-             strerror(result < 0 ? -result : result));
+             action, ifname ? ifname : "", tunnel_id, result,
+             error_name(result), strerror(result < 0 ? -result : result));
   } else if (!result) {
-    printf("%s succeeded: ifindex=%u tunnel_id=%u\n", action, ifindex,
-           tunnel_id);
+    printf("%s succeeded: ifname=%s tunnel_id=%u\n", action,
+           ifname ? ifname : "-", tunnel_id);
   } else {
     fprintf(stderr, "%s failed: %s\n", action,
             strerror(result < 0 ? -result : result));
@@ -252,8 +266,37 @@ static int command_result(const char *action, enum output_format format,
   return result ? 1 : 0;
 }
 
+static int index_result(const char *action, enum output_format format,
+                        uint32_t ifindex, int result) {
+  if (format == FORMAT_JSON) {
+    if (!result)
+      printf("{\"action\":\"%s\",\"success\":true,\"ifindex\":%u}\n", action,
+             ifindex);
+    else
+      printf("{\"action\":\"%s\",\"success\":false,\"ifindex\":%u,"
+             "\"error\":{\"code\":%d,\"name\":\"%s\",\"message\":\"%s\"}}\n",
+             action, ifindex, result, error_name(result), strerror(-result));
+  } else if (!result)
+    printf("%s succeeded: ifindex=%u\n", action, ifindex);
+  else
+    fprintf(stderr, "%s failed: %s\n", action, strerror(-result));
+  return result ? 1 : 0;
+}
+
+static int cli_error(const char *action, enum output_format format, int code,
+                     const char *message) {
+  if (format == FORMAT_JSON)
+    printf("{\"action\":\"%s\",\"success\":false,\"error\":{\"code\":%d,"
+           "\"name\":\"EINVAL\",\"message\":\"%s\"}}\n",
+           action, code, message);
+  else
+    fprintf(stderr, "%s\n", message);
+  return code;
+}
+
 int main(int argc, char **argv) {
   const char *action;
+  const char *ifname = NULL;
   enum output_format format = FORMAT_HUMAN;
   uint32_t ifindex = 0, tunnel_id = 0, remote_tunnel_id = 0;
   uint64_t node_id = 0, generation = 0;
@@ -261,7 +304,8 @@ int main(int argc, char **argv) {
   uint16_t udp_port = 0;
   uint8_t key[32] = {0}, prefix_len = 32;
   int has_key = 0, dynamic_raw = 0, dynamic_raw_seen = 0;
-  int format_seen = 0, generation_seen = 0;
+  int generation_seen = 0;
+  int peer_action;
   int i, result;
 
   if (argc >= 2 && !strcmp(argv[1], "ha"))
@@ -275,14 +319,13 @@ int main(int argc, char **argv) {
     return 2;
   }
   action = argv[1];
+  peer_action = !strncmp(action, "peer-", 5);
   for (i = 2; i < argc; i++) {
     const char *value = NULL;
     if (!strcmp(argv[i], "--format") && i + 1 < argc) {
       value = argv[++i];
-      format_seen = 1;
     } else if (!strncmp(argv[i], "--format=", 9)) {
       value = argv[i] + 9;
-      format_seen = 1;
     }
     if (value) {
       if (!strcmp(value, "human"))
@@ -293,9 +336,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid format: %s\n", value);
         return 2;
       }
-    } else if (!strcmp(argv[i], "--ifindex") && i + 1 < argc)
+    } else if (!strcmp(argv[i], "--ifname") && i + 1 < argc)
+      ifname = argv[++i];
+    else if (!strcmp(argv[i], "--ifindex") && i + 1 < argc) {
+      if (peer_action) {
+        return cli_error(action, format, 2,
+                         "peer commands use --ifname; --ifindex was removed");
+      }
       ifindex = strtoul(argv[++i], NULL, 10);
-    else if (!strcmp(argv[i], "--tunnel-id") && i + 1 < argc)
+    } else if (!strcmp(argv[i], "--tunnel-id") && i + 1 < argc)
       tunnel_id = strtoul(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "--remote-tunnel-id") && i + 1 < argc)
       remote_tunnel_id = strtoul(argv[++i], NULL, 10);
@@ -318,19 +367,47 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--prefix") && i + 1 < argc)
       parse_prefix(argv[++i], &prefix, &prefix_len);
     else {
-      fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]);
-      return 2;
+      char message[256];
+      snprintf(message, sizeof(message), "unknown or incomplete option: %s",
+               argv[i]);
+      return cli_error(action, format, 2, message);
     }
   }
 
-  if ((!strncmp(action, "route-", 6) || !strcmp(action, "rebind") ||
-       !strcmp(action, "hub-set")) &&
-      format_seen) {
-    fprintf(stderr, "--format is supported only by peer commands\n");
-    return 2;
+  if (peer_action && strcmp(action, "peer-list") && !ifname) {
+    char message[128];
+    snprintf(message, sizeof(message), "%s requires --ifname", action);
+    return cli_error(action, format, 2, message);
   }
-  if (!ifindex || (strcmp(action, "peer-list") && strcmp(action, "rebind") &&
-                   strcmp(action, "hub-set") && !tunnel_id)) {
+  if (peer_action && ifname) {
+    dtun_nl_link_info_t *links = NULL;
+    size_t count = 0;
+    int found = 0;
+
+    result = dtun_link_list(&links, &count);
+    for (size_t n = 0; !result && n < count; n++)
+      if (!strcmp(links[n].ifname, ifname)) {
+        ifindex = links[n].ifindex;
+        found = 1;
+        break;
+      }
+    free(links);
+    if (result || !found) {
+      if (format == FORMAT_JSON)
+        printf("{\"action\":\"%s\",\"success\":false,\"ifname\":\"%s\","
+               "\"error\":{\"code\":%d,\"name\":\"ENODEV\","
+               "\"message\":\"interface is missing or is not a dtun "
+               "interface\"}}\n",
+               action, ifname, -ENODEV);
+      else
+        fprintf(stderr, "interface is missing or is not a dtun interface: %s\n",
+                ifname);
+      return 1;
+    }
+  }
+  if ((!peer_action && !ifindex) ||
+      (strcmp(action, "peer-list") && strcmp(action, "rebind") &&
+       strcmp(action, "hub-set") && !tunnel_id)) {
     fprintf(stderr,
             "--ifindex and, for this command, --tunnel-id are required\n");
     return 2;
@@ -354,16 +431,16 @@ int main(int argc, char **argv) {
     memcpy(info.key, key, sizeof(info.key));
     result = !strcmp(action, "peer-add") ? dtun_nl_peer_add(&info)
                                          : dtun_nl_peer_set(&info);
-    return command_result(action, format, ifindex, tunnel_id, result);
+    return command_result(action, format, ifname, tunnel_id, result);
   }
   if (!strcmp(action, "peer-del"))
-    return command_result(action, format, ifindex, tunnel_id,
+    return command_result(action, format, ifname, tunnel_id,
                           dtun_nl_peer_del(ifindex, tunnel_id));
   if (!strcmp(action, "peer-get")) {
     dtun_nl_peer_status_t status;
     result = dtun_nl_peer_get(ifindex, tunnel_id, &status);
     if (result)
-      return command_result(action, format, ifindex, tunnel_id, result);
+      return command_result(action, format, ifname, tunnel_id, result);
     if (format == FORMAT_JSON) {
       print_peer_json(&status);
       putchar('\n');
@@ -374,9 +451,38 @@ int main(int argc, char **argv) {
   if (!strcmp(action, "peer-list")) {
     dtun_nl_peer_status_t *items = NULL;
     size_t count = 0, n;
-    result = dtun_nl_peer_list(ifindex, &items, &count);
+    if (ifname)
+      result = dtun_nl_peer_list(ifindex, &items, &count);
+    else {
+      dtun_nl_link_info_t *links = NULL;
+      size_t link_count = 0;
+
+      result = dtun_link_list(&links, &link_count);
+      for (size_t link = 0; !result && link < link_count; link++) {
+        dtun_nl_peer_status_t *part = NULL, *grown;
+        size_t part_count = 0;
+
+        result = dtun_nl_peer_list(links[link].ifindex, &part, &part_count);
+        if (result) {
+          free(part);
+          break;
+        }
+        grown = realloc(items, (count + part_count) * sizeof(*items));
+        if (part_count && !grown) {
+          free(part);
+          result = -ENOMEM;
+          break;
+        }
+        items = grown;
+        if (part_count)
+          memcpy(items + count, part, part_count * sizeof(*part));
+        count += part_count;
+        free(part);
+      }
+      free(links);
+    }
     if (result)
-      return command_result(action, format, ifindex, 0, result);
+      return command_result(action, format, ifname, 0, result);
     qsort(items, count, sizeof(*items), compare_peer);
     if (format == FORMAT_JSON) {
       putchar('[');
@@ -393,11 +499,7 @@ int main(int argc, char **argv) {
   }
   if (!strcmp(action, "rebind")) {
     result = dtun_nl_rebind(ifindex);
-    if (!result)
-      printf("rebind triggered: ifindex=%u\n", ifindex);
-    else
-      fprintf(stderr, "rebind failed: %s\n", strerror(-result));
-    return result ? 1 : 0;
+    return index_result(action, format, ifindex, result);
   }
   if (!strcmp(action, "hub-set")) {
     if (!udp_addr.s_addr || !udp_port) {
@@ -405,11 +507,7 @@ int main(int argc, char **argv) {
       return 2;
     }
     result = dtun_nl_hub_set(ifindex, udp_addr, udp_port);
-    if (!result)
-      printf("hub endpoint updated: ifindex=%u\n", ifindex);
-    else
-      fprintf(stderr, "hub-set failed: %s\n", strerror(-result));
-    return result ? 1 : 0;
+    return index_result(action, format, ifindex, result);
   }
   if (!strcmp(action, "route-add"))
     result = dtun_nl_route_add(ifindex, tunnel_id, prefix, prefix_len);
@@ -419,7 +517,5 @@ int main(int argc, char **argv) {
     fprintf(stderr, "unknown action: %s\n", action);
     return 2;
   }
-  if (result)
-    fprintf(stderr, "%s failed: %s\n", action, strerror(-result));
-  return result ? 1 : 0;
+  return index_result(action, format, ifindex, result);
 }

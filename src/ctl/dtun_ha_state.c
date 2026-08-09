@@ -160,6 +160,28 @@ void dtun_ha_state_unlock(int lock_fd) {
   close(lock_fd);
 }
 
+int dtun_ha_runtime_lock(const char *path, int nonblock) {
+  char lock_path[560];
+  int fd, operation = LOCK_EX;
+
+  if (!path || snprintf(lock_path, sizeof(lock_path), "%s.runtime", path) >=
+                   (int)sizeof(lock_path))
+    return -ENAMETOOLONG;
+  if (dtun_ha_make_parent_dirs(lock_path, 0750) < 0)
+    return -1;
+  fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (fd < 0)
+    return -errno;
+  if (nonblock)
+    operation |= LOCK_NB;
+  if (flock(fd, operation) < 0) {
+    int error = -errno;
+    close(fd);
+    return error;
+  }
+  return fd;
+}
+
 dtun_ha_member_t *dtun_ha_member_find(dtun_ha_state_t *state,
                                       const char *hub_id) {
   uint32_t i;

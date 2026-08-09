@@ -2,12 +2,14 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -15,6 +17,38 @@
 
 #define HA_JOIN_MAGIC "DTJ1"
 #define HA_JOIN_MAX_CONFIG 8192
+#define HA_ADMIN_MAGIC "DTHA"
+
+typedef struct __attribute__((packed)) {
+  char magic[4];
+  uint8_t action;
+  uint8_t force;
+  uint8_t cluster_id[DTUN_HA_CLUSTER_ID_LEN];
+  char signer[DTUN_HA_ID_LEN];
+  char target[DTUN_HA_ID_LEN];
+  uint8_t nonce[16];
+  uint8_t signature[64];
+} admin_request_t;
+
+typedef struct __attribute__((packed)) {
+  char magic[4];
+  uint8_t status;
+  uint64_t term;
+  uint64_t commit_index;
+  uint8_t nonce[16];
+  uint8_t signature[64];
+} admin_reply_t;
+
+static uint8_t admin_nonces[64][16];
+static uint32_t admin_nonce_cursor;
+
+static int admin_nonce_new(const uint8_t nonce[16]) {
+  for (size_t i = 0; i < sizeof(admin_nonces) / sizeof(admin_nonces[0]); i++)
+    if (!memcmp(admin_nonces[i], nonce, 16))
+      return 0;
+  memcpy(admin_nonces[admin_nonce_cursor++ % 64], nonce, 16);
+  return 1;
+}
 
 typedef struct __attribute__((packed)) {
   char magic[4];
@@ -345,4 +379,182 @@ out:
   OPENSSL_cleanse(session, sizeof(session));
   free(cipher);
   return result;
+}
+
+static int sign_admin(const char *path, void *message, size_t signed_length,
+                      uint8_t signature[64]) {
+  EVP_PKEY *key = load_private(path);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  size_t length = 64;
+  int ok =
+      key && ctx && EVP_DigestSignInit(ctx, NULL, NULL, NULL, key) == 1 &&
+      EVP_DigestSign(ctx, signature, &length, message, signed_length) == 1 &&
+      length == 64;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(key);
+  return ok ? 0 : -1;
+}
+
+static int verify_admin(const uint8_t public_key[32], const void *message,
+                        size_t signed_length, const uint8_t signature[64]) {
+  EVP_PKEY *key =
+      EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, public_key, 32);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  int ok = key && ctx &&
+           EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, key) == 1 &&
+           EVP_DigestVerify(ctx, signature, 64, message, signed_length) == 1;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(key);
+  return ok ? 0 : -1;
+}
+
+static int admin_connect(struct in_addr address, uint16_t port) {
+  struct sockaddr_in target = {
+      .sin_family = AF_INET, .sin_addr = address, .sin_port = htons(port)};
+  struct pollfd wait;
+  socklen_t length;
+  int fd, flags, error = 0, ready;
+
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+  flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    goto fail;
+  ready = connect(fd, (struct sockaddr *)&target, sizeof(target));
+  if (ready < 0 && errno == EINPROGRESS) {
+    wait.fd = fd;
+    wait.events = POLLOUT;
+    ready = poll(&wait, 1, 500);
+  } else if (!ready)
+    ready = 1;
+  length = sizeof(error);
+  if (ready <= 0 || getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) < 0 ||
+      error || fcntl(fd, F_SETFL, flags) < 0)
+    goto fail;
+  return fd;
+fail:
+  close(fd);
+  return -1;
+}
+
+int dtun_ha_admin_client(struct in_addr address, uint16_t port,
+                         const dtun_ha_state_t *state,
+                         const char *identity_key_path, uint8_t action,
+                         const char *target_hub_id, int force,
+                         dtun_ha_admin_reply_t *reply) {
+  admin_request_t request;
+  admin_reply_t response;
+  dtun_ha_member_t *server;
+  dtun_ha_state_t copy = *state;
+  int fd, result = -1;
+
+  dtun_ha_member_t *target = dtun_ha_member_find(&copy, target_hub_id);
+  if (action == DTUN_HA_ADMIN_STATUS ||
+      (target && target->address.s_addr == address.s_addr &&
+       target->ha_port == port))
+    server = dtun_ha_member_find(&copy, target_hub_id);
+  else
+    server = dtun_ha_member_find(&copy, copy.leader_id);
+  if (!server)
+    return -1;
+  memset(&request, 0, sizeof(request));
+  memcpy(request.magic, HA_ADMIN_MAGIC, 4);
+  request.action = action;
+  request.force = force != 0;
+  memcpy(request.cluster_id, state->cluster_id, sizeof(request.cluster_id));
+  snprintf(request.signer, sizeof(request.signer), "%s", state->local_hub_id);
+  snprintf(request.target, sizeof(request.target), "%s", target_hub_id);
+  RAND_bytes(request.nonce, sizeof(request.nonce));
+  if (sign_admin(identity_key_path, &request,
+                 offsetof(admin_request_t, signature), request.signature) < 0)
+    return -1;
+  fd = admin_connect(address, port);
+  if (fd < 0)
+    return -1;
+  if (io_all(fd, &request, sizeof(request), 1) < 0 ||
+      io_all(fd, &response, sizeof(response), 0) < 0 ||
+      memcmp(response.magic, HA_ADMIN_MAGIC, 4) ||
+      memcmp(response.nonce, request.nonce, sizeof(request.nonce)) ||
+      verify_admin(server->public_key, &response,
+                   offsetof(admin_reply_t, signature), response.signature) < 0)
+    goto out;
+  if (reply) {
+    reply->status = response.status;
+    reply->term = be64toh(response.term);
+    reply->commit_index = be64toh(response.commit_index);
+  }
+  result = response.status ? -response.status : 0;
+out:
+  close(fd);
+  return result;
+}
+
+int dtun_ha_admin_server(int fd, dtun_ha_state_t *state, const char *state_path,
+                         const char *identity_key_path) {
+  admin_request_t request;
+  admin_reply_t response;
+  dtun_ha_member_t *signer, *target;
+  int authorized = 0, changed = 0;
+
+  memset(&response, 0, sizeof(response));
+  memcpy(response.magic, HA_ADMIN_MAGIC, 4);
+  if (io_all(fd, &request, sizeof(request), 0) < 0 ||
+      memcmp(request.magic, HA_ADMIN_MAGIC, 4))
+    return -1;
+  memcpy(response.nonce, request.nonce, sizeof(response.nonce));
+  signer = dtun_ha_member_find(state, request.signer);
+  target = dtun_ha_member_find(state, request.target);
+  if (signer &&
+      !memcmp(request.cluster_id, state->cluster_id,
+              sizeof(request.cluster_id)) &&
+      verify_admin(signer->public_key, &request,
+                   offsetof(admin_request_t, signature),
+                   request.signature) == 0 &&
+      admin_nonce_new(request.nonce)) {
+    if (request.action == DTUN_HA_ADMIN_STATUS)
+      authorized = 1;
+    else if (request.action == DTUN_HA_ADMIN_LEAVE)
+      authorized = target && !strcmp(request.signer, request.target) &&
+                   strcmp(request.target, state->primary_hub_id) &&
+                   strcmp(request.target, state->leader_id);
+    else
+      authorized = !strcmp(request.signer, state->primary_hub_id) &&
+                   (!strcmp(state->local_hub_id, state->leader_id) ||
+                    !strcmp(request.target, state->local_hub_id));
+  }
+  if (!authorized || !target)
+    response.status = EPERM;
+  else if (request.action == DTUN_HA_ADMIN_DISABLE) {
+    target->enabled = 0;
+    target->lifecycle = DTUN_HA_MEMBER_DISABLED;
+    changed = 1;
+  } else if (request.action == DTUN_HA_ADMIN_ENABLE) {
+    if (target->lifecycle == DTUN_HA_MEMBER_EVICTED)
+      response.status = EPERM;
+    else {
+      target->enabled = 1;
+      target->lifecycle = DTUN_HA_MEMBER_ACTIVE;
+      target->role = DTUN_HA_LEARNER;
+      changed = 1;
+    }
+  } else if (request.action == DTUN_HA_ADMIN_KICK ||
+             request.action == DTUN_HA_ADMIN_LEAVE) {
+    target->enabled = 0;
+    target->lifecycle = DTUN_HA_MEMBER_EVICTED;
+    changed = 1;
+  }
+  if (changed) {
+    state->manifest_version++;
+    state->commit_index++;
+    if (dtun_ha_state_save(state_path, state) < 0)
+      response.status = EIO;
+  }
+  response.term = htobe64(state->term);
+  response.commit_index = htobe64(state->commit_index);
+  if (sign_admin(identity_key_path, &response,
+                 offsetof(admin_reply_t, signature), response.signature) < 0 ||
+      io_all(fd, &response, sizeof(response), 1) < 0)
+    return -1;
+  return response.status ? -response.status : 0;
 }

@@ -21,7 +21,8 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 - 有效 UDP 帧通过 HMAC 后可以更新 NAT 映射得到的来源 `IP:port`。
 - DTRG 控制面支持轻量 REFRESH、候选代次、分页同步、Hub 状态持久化和 spoke 间 `/32` 直连同步。
 - 探测周期与离线阈值由 EWMA/RTTVAR 自适应计算；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
-- `dtunctl peer-list --ifindex N` 可列出全部 peer；peer 命令支持 `--format json`。
+- `dtunctl peer-list` 自动列出所有 dtun 接口的 peer；peer 命令使用
+  `--ifname NAME`并支持 `--format json`。
 - C `dtund` 和 `dtunctl` 是唯一正式控制面；Python 仅用于测试造包。
 - Raw 和 UDP 外层发送均进入 IPv4 local-output/netfilter 路径。
 

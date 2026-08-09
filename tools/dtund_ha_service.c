@@ -22,6 +22,7 @@
 struct dtund_ha_service {
   pthread_t thread;
   int listener;
+  int runtime_lock;
   int stopping;
   char state_path[512];
   char identity_path[512];
@@ -97,6 +98,7 @@ static int add_joined_member(dtun_ha_state_t *state,
   member->control_port = control_port;
   member->data_port = data_port;
   member->enabled = 1;
+  member->lifecycle = DTUN_HA_MEMBER_ACTIVE;
   member->role = DTUN_HA_LEARNER;
   member->endpoint_generation++;
   state->manifest_version++;
@@ -184,6 +186,13 @@ static void *service_thread(void *argument) {
       close(fd);
       continue;
     }
+    if (!memcmp(magic, "DTHA", 4)) {
+      if (dtun_ha_state_load(s->state_path, &state) == 0)
+        (void)dtun_ha_admin_server(fd, &state, s->state_path, s->identity_path);
+      dtun_ha_state_unlock(state_lock);
+      close(fd);
+      continue;
+    }
     if (dtun_ha_state_load(s->state_path, &state) == 0 &&
         dtun_ha_join_server(fd, &state, s->state_path, s->identity_path,
                             s->configuration, &peer) == 0) {
@@ -229,6 +238,7 @@ int dtund_ha_service_start(dtund_ha_service_t **out, const dtun_config_t *c) {
   if (!s)
     return -1;
   s->listener = -1;
+  s->runtime_lock = -1;
   s->ha_port = (uint16_t)c->ha_port;
   s->control_port = (uint16_t)c->bind_port;
   s->data_port = (uint16_t)c->data_port;
@@ -238,6 +248,11 @@ int dtund_ha_service_start(dtund_ha_service_t **out, const dtun_config_t *c) {
   snprintf(s->identity_path, sizeof(s->identity_path), "%s",
            c->ha_identity_key);
   snprintf(s->hub_state_path, sizeof(s->hub_state_path), "%s", c->state_file);
+  s->runtime_lock = dtun_ha_runtime_lock(s->state_path, 1);
+  if (s->runtime_lock < 0) {
+    dtun_log_err("HA state is already in use: %s", s->state_path);
+    goto fail;
+  }
   snprintf(s->configuration, sizeof(s->configuration),
            "[cluster]\naddress = %s\npool = %s\ndata_port = %d\npsk = %s\n"
            "identity_retention = %d\nfailback = %s\n"
@@ -269,6 +284,7 @@ int dtund_ha_service_start(dtund_ha_service_t **out, const dtun_config_t *c) {
 fail:
   if (s->listener >= 0)
     close(s->listener);
+  dtun_ha_state_unlock(s->runtime_lock);
   pthread_cond_destroy(&s->replicated);
   pthread_mutex_destroy(&s->lock);
   free(s);
@@ -282,6 +298,7 @@ void dtund_ha_service_stop(dtund_ha_service_t *s) {
   shutdown(s->listener, SHUT_RDWR);
   close(s->listener);
   pthread_join(s->thread, NULL);
+  dtun_ha_state_unlock(s->runtime_lock);
   pthread_cond_destroy(&s->replicated);
   pthread_mutex_destroy(&s->lock);
   free(s);
@@ -439,7 +456,8 @@ int dtund_ha_standby_step(const dtun_config_t *c,
   }
   now_ms = dtun_monotonic_ms();
   note_ha_probe_miss(leader_health, now_ms);
-  if (local->role == DTUN_HA_VOTER &&
+  if (local->enabled && local->lifecycle == DTUN_HA_MEMBER_ACTIVE &&
+      local->role == DTUN_HA_VOTER &&
       leader_health->state == DTUN_LIVENESS_OFFLINE) {
     uint32_t voters = 0, votes = 1, higher = 0;
     uint64_t term;

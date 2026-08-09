@@ -51,12 +51,18 @@ typedef struct {
   uint32_t udp_last_ack_ms;
 } dtun_nl_peer_status_t;
 
+typedef struct {
+  uint32_t ifindex;
+  char ifname[16];
+} dtun_nl_link_info_t;
+
 /* Initialize Netlink connection. Resolves Generic Netlink DTUN family ID. */
 int dtun_nl_init(void);
 void dtun_nl_close(void);
 
 /* Check if interface exists and return ifindex (>0) or 0 if not found. */
 uint32_t dtun_link_get_ifindex(const char *ifname);
+int dtun_link_list(dtun_nl_link_info_t **links, size_t *count);
 
 /* Create dtun interface via RTNL. Returns ifindex or < 0 on error. */
 int dtun_link_create(const char *ifname, struct in_addr local_addr,

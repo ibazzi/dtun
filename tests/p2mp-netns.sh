@@ -128,8 +128,8 @@ for i in $(seq 1 25); do
 	ifa=$(ip -n "$A" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
 	ifb=$(ip -n "$B" link show dtun0 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p')
 	if [ -n "$ifa" ] && [ -n "$ifb" ] &&
-	   ip netns exec "$A" "$CTL" peer-get --format json --ifindex "$ifa" --tunnel-id 104 2>/dev/null | grep -q '"node_id":3' &&
-	   ip netns exec "$B" "$CTL" peer-get --format json --ifindex "$ifb" --tunnel-id 105 2>/dev/null | grep -q '"node_id":2'; then
+	   ip netns exec "$A" "$CTL" peer-get --format json --ifname dtun0 --tunnel-id 104 2>/dev/null | grep -q '"node_id":3' &&
+	   ip netns exec "$B" "$CTL" peer-get --format json --ifname dtun0 --tunnel-id 105 2>/dev/null | grep -q '"node_id":2'; then
 		direct=1
 		break
 	fi
@@ -175,12 +175,12 @@ stop_pid "$OUT/b.pid"
 expired=0
 ifh=$(ip -n "$HUB" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
 hub_b_tunnel=$(ip netns exec "$HUB" "$CTL" peer-list --format json \
-	--ifindex "$ifh" | python3 -c \
+	--ifname dtun0 | python3 -c \
 	'import json,sys; print(next(p["tunnel_id"] for p in json.load(sys.stdin) if p["node_id"] == 3))')
 for i in $(seq 1 15); do
-	if ! ip netns exec "$HUB" "$CTL" peer-get --ifindex "$ifh" \
+	if ! ip netns exec "$HUB" "$CTL" peer-get --ifname dtun0 \
 			--tunnel-id "$hub_b_tunnel" >/dev/null 2>&1 &&
-	   ip netns exec "$A" "$CTL" peer-get --format json --ifindex "$ifa" \
+	   ip netns exec "$A" "$CTL" peer-get --format json --ifname dtun0 \
 		--tunnel-id 104 2>/dev/null | grep -q '"selected_path":"hub"'; then
 		expired=1
 		break

@@ -50,9 +50,14 @@ int main(void) {
   CHECK(!dtund_spoke_ha_failover(&state, &current, 100599));
   CHECK(dtund_spoke_ha_failover(&state, &current, 100600));
   CHECK(current.sin_addr.s_addr == hubs[2].address.s_addr);
+  for (int i = 0; i < 4; i++)
+    dtund_spoke_ha_missed(&state, 100800 + (uint64_t)i * 100);
+  CHECK(dtund_spoke_ha_failover(&state, &current, 101500));
+  CHECK(current.sin_addr.s_addr == hubs[0].address.s_addr);
+  state.force_switch = 1;
   CHECK(dtund_spoke_ha_save(&state, path) == 0);
   CHECK(dtund_spoke_ha_load(&loaded, path, 200000) == 0 && loaded.term == 2 &&
-        loaded.hub_count == 3);
+        loaded.hub_count == 3 && !loaded.force_switch);
   unlink(path);
   puts("Spoke HA selection/persistence tests passed");
   return 0;

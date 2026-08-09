@@ -101,9 +101,16 @@ sudo -v
 for i in 0 1; do
     socket="$RUN/ssh-$i.sock"
     SOCKETS+=("$socket")
-    ssh -MNf -o ControlMaster=yes -o ControlPersist=600 \
-        -o ControlPath="$socket" -o UserKnownHostsFile="$KNOWN" \
-        -o StrictHostKeyChecking=accept-new "${HOSTS[$i]}"
+    if [[ -n ${DTUN_TEST_PASSWORD:-} ]]; then
+        SSHPASS=$DTUN_TEST_PASSWORD sshpass -e ssh -MNf \
+            -o ControlMaster=yes -o ControlPersist=600 \
+            -o ControlPath="$socket" -o UserKnownHostsFile="$KNOWN" \
+            -o StrictHostKeyChecking=accept-new "${HOSTS[$i]}"
+    else
+        ssh -MNf -o ControlMaster=yes -o ControlPersist=600 \
+            -o ControlPath="$socket" -o UserKnownHostsFile="$KNOWN" \
+            -o StrictHostKeyChecking=accept-new "${HOSTS[$i]}"
+    fi
 done
 CLEANUP_READY=1
 if lsmod | grep -q '^dtun '; then die "local dtun module is already loaded"; fi

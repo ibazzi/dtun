@@ -4,6 +4,16 @@ CTL=${CTL:-./build/dtunctl}
 TMP=$(mktemp -d /tmp/dtun-ha-cli-XXXXXX)
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
+expect_rc() {
+    expected=$1
+    shift
+    set +e
+    "$@" >"$TMP/command.out" 2>"$TMP/command.err"
+    actual=$?
+    set -e
+    test "$actual" -eq "$expected"
+}
+
 cat >"$TMP/hub.conf" <<EOF
 [global]
 mode = hub
@@ -50,7 +60,33 @@ fi
 test ! -s "$TMP/error.out"
 grep -q 'invalid --format' "$TMP/error.err"
 "$CTL" ha status --state-file "$TMP/state" | grep -q 'Mode: bootstrap'
+"$CTL" ha status --format json --state-file "$TMP/state" \
+    --identity-key "$TMP/ha/identity.key" >"$TMP/status.json"
+python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["local"]["configured_role"] == "primary" and isinstance(d["members"], list)' <"$TMP/status.json"
 "$CTL" ha invite list --state-file "$TMP/state" |
     grep -q 'hub=hub-backup-1 weight=900 status=unused'
+"$CTL" ha invite list --format json --state-file "$TMP/state" |
+    python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 3'
+
+before=$(sha256sum "$TMP/state")
+expect_rc 2 "$CTL" ha member remove --hub-id hub-primary \
+    --state-file "$TMP/state"
+test "$before" = "$(sha256sum "$TMP/state")"
+
+old_cluster=$("$CTL" ha status --format json --state-file "$TMP/state" \
+    --identity-key "$TMP/ha/identity.key" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["cluster"]["id"])')
+flock -x "$TMP/state.runtime" -c 'sleep 1' &
+lock_pid=$!
+sleep 0.1
+expect_rc 1 "$CTL" ha rebuild --force --config "$TMP/hub.conf"
+wait "$lock_pid"
+"$CTL" ha rebuild --force --config "$TMP/hub.conf" --format json >"$TMP/rebuild.json"
+python3 -c 'import json,sys; assert json.load(sys.stdin)["success"]' <"$TMP/rebuild.json"
+new_cluster=$("$CTL" ha status --format json --state-file "$TMP/state" \
+    --identity-key "$TMP/ha/identity.key" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["cluster"]["id"])')
+test "$old_cluster" != "$new_cluster"
+test "$("$CTL" ha invite list --format json --state-file "$TMP/state")" = '[]'
 
 echo "dtunctl HA configuration tests passed"

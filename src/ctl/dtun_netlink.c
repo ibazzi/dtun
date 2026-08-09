@@ -390,6 +390,108 @@ uint32_t dtun_link_get_ifindex(const char *ifname) {
   return if_nametoindex(ifname);
 }
 
+static int link_kind_is_dtun(struct rtattr *linkinfo) {
+  int length = RTA_PAYLOAD(linkinfo);
+  struct rtattr *attr = RTA_DATA(linkinfo);
+
+  while (RTA_OK(attr, length)) {
+    if (attr->rta_type == IFLA_INFO_KIND &&
+        !strcmp((const char *)RTA_DATA(attr), "dtun"))
+      return 1;
+    attr = RTA_NEXT(attr, length);
+  }
+  return 0;
+}
+
+int dtun_link_list(dtun_nl_link_info_t **links, size_t *count) {
+  char request[NLMSG_SPACE(sizeof(struct ifinfomsg))] = {0};
+  char response[16384];
+  struct nlmsghdr *header = (struct nlmsghdr *)request;
+  struct ifinfomsg *info = NLMSG_DATA(header);
+  struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
+  dtun_nl_link_info_t *items = NULL;
+  size_t used = 0, capacity = 0;
+  int fd, result = 0;
+
+  if (!links || !count)
+    return -EINVAL;
+  *links = NULL;
+  *count = 0;
+  fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+  if (fd < 0)
+    return -errno;
+  header->nlmsg_len = NLMSG_LENGTH(sizeof(*info));
+  header->nlmsg_type = RTM_GETLINK;
+  header->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+  header->nlmsg_seq = 1;
+  info->ifi_family = AF_UNSPEC;
+  if (sendto(fd, request, header->nlmsg_len, 0, (struct sockaddr *)&kernel,
+             sizeof(kernel)) < 0) {
+    result = -errno;
+    goto out;
+  }
+  for (;;) {
+    ssize_t received = recv(fd, response, sizeof(response), 0);
+    struct nlmsghdr *message;
+
+    if (received < 0) {
+      result = -errno;
+      goto out;
+    }
+    for (message = (struct nlmsghdr *)response; NLMSG_OK(message, received);
+         message = NLMSG_NEXT(message, received)) {
+      struct ifinfomsg *entry;
+      struct rtattr *attr, *kind = NULL;
+      const char *name = NULL;
+      int length;
+
+      if (message->nlmsg_type == NLMSG_DONE)
+        goto done;
+      if (message->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr *error = NLMSG_DATA(message);
+        result = error->error ? error->error : -EIO;
+        goto out;
+      }
+      if (message->nlmsg_type != RTM_NEWLINK)
+        continue;
+      entry = NLMSG_DATA(message);
+      attr = IFLA_RTA(entry);
+      length = IFLA_PAYLOAD(message);
+      while (RTA_OK(attr, length)) {
+        if (attr->rta_type == IFLA_IFNAME)
+          name = RTA_DATA(attr);
+        else if (attr->rta_type == IFLA_LINKINFO)
+          kind = attr;
+        attr = RTA_NEXT(attr, length);
+      }
+      if (!name || !kind || !link_kind_is_dtun(kind))
+        continue;
+      if (used == capacity) {
+        size_t next = capacity ? capacity * 2 : 4;
+        dtun_nl_link_info_t *grown = realloc(items, next * sizeof(*items));
+        if (!grown) {
+          result = -ENOMEM;
+          goto out;
+        }
+        items = grown;
+        capacity = next;
+      }
+      memset(&items[used], 0, sizeof(items[used]));
+      items[used].ifindex = (uint32_t)entry->ifi_index;
+      snprintf(items[used].ifname, sizeof(items[used].ifname), "%s", name);
+      used++;
+    }
+  }
+done:
+  *links = items;
+  *count = used;
+  items = NULL;
+out:
+  free(items);
+  close(fd);
+  return result;
+}
+
 int dtun_link_create(const char *ifname, struct in_addr local_addr,
                      uint16_t udp_port, uint64_t node_id,
                      struct in_addr hub_addr, uint16_t hub_port) {

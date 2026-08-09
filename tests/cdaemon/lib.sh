@@ -194,7 +194,7 @@ tx_drop() { # ns
 
 peer_get() { # ns tunnel_id
 	ns=$1; tid=$2
-	ip netns exec "$ns" "$CTL" peer-get --format json --ifindex "$(ifindex "$ns")" --tunnel-id "$tid"
+	ip netns exec "$ns" "$CTL" peer-get --format json --ifname dtun0 --tunnel-id "$tid"
 }
 
 ipt_counters() { # ns  (echoes "raw udp")

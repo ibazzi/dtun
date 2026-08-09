@@ -33,9 +33,9 @@ ip -n "$PA" addr add 10.99.0.1/24 dev dtun0; ip -n "$PB" addr add 10.99.0.2/24 d
 ip -n "$PA" link set dtun0 up; ip -n "$PB" link set dtun0 up
 IFA=$(ip -n "$PA" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
 IFB=$(ip -n "$PB" link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
-ip netns exec "$PA" "$CTL" peer-add --ifindex "$IFA" --tunnel-id 100 --node-id 2 \
+ip netns exec "$PA" "$CTL" peer-add --ifname dtun0 --tunnel-id 100 --node-id 2 \
 	--raw 172.30.93.2 --udp 172.30.93.2:49000 --key "$KEY"
-ip netns exec "$PB" "$CTL" peer-add --ifindex "$IFB" --tunnel-id 100 --node-id 1 \
+ip netns exec "$PB" "$CTL" peer-add --ifname dtun0 --tunnel-id 100 --node-id 1 \
 	--raw 172.30.93.1 --udp 172.30.93.1:49000 --key "$KEY"
 ip netns exec "$PA" "$CTL" route-add --ifindex "$IFA" --tunnel-id 100 --prefix 10.99.0.0/24
 ip netns exec "$PB" "$CTL" route-add --ifindex "$IFB" --tunnel-id 100 --prefix 10.99.0.0/24
@@ -106,8 +106,8 @@ section "UDP small-packet rate (pps)"
 udp_test udp-pps "$PA" "$PB" 10.99.0.2 5206 0 -l 100
 
 section "UDP-only path (raw cleared) throughput"
-ip netns exec "$PA" "$CTL" peer-set --ifindex "$IFA" --tunnel-id 100 --raw 0.0.0.0 --udp 172.30.93.2:49000
-ip netns exec "$PB" "$CTL" peer-set --ifindex "$IFB" --tunnel-id 100 --raw 0.0.0.0 --udp 172.30.93.1:49000
+ip netns exec "$PA" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 --raw 0.0.0.0 --udp 172.30.93.2:49000
+ip netns exec "$PB" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 --raw 0.0.0.0 --udp 172.30.93.1:49000
 sleep 1
 udp_test udp-only-500m-a2b "$PA" "$PB" 10.99.0.2 5207 500M -l 1200
 tcp_test tcp-udp-only-a2b "$PA" "$PB" 10.99.0.2 5208
@@ -115,8 +115,8 @@ bidir_tcp_test bidir-udp 30 5214 5215
 if [ "${DTUN_LONG_SOAK:-0}" = 1 ]; then
 	bidir_tcp_test bidir-udp-soak 300 5216 5217
 fi
-ip netns exec "$PA" "$CTL" peer-set --ifindex "$IFA" --tunnel-id 100 --raw 172.30.93.2 --udp 172.30.93.2:49000
-ip netns exec "$PB" "$CTL" peer-set --ifindex "$IFB" --tunnel-id 100 --raw 172.30.93.1 --udp 172.30.93.1:49000
+ip netns exec "$PA" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 --raw 172.30.93.2 --udp 172.30.93.2:49000
+ip netns exec "$PB" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 --raw 172.30.93.1 --udp 172.30.93.1:49000
 sleep 1
 
 section "latency idle"

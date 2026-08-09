@@ -29,6 +29,9 @@ weighted majority election for three or more Hubs.
   Spokes.
 - C `dtund` and `dtunctl` are the only supported control plane; Python remains
   only in packet-generation test helpers.
+- Peer commands select interfaces with `--ifname`; `peer-list` without a
+  selector combines peers from every dtun interface. Commands support
+  `--format json` for automation.
 - Both Raw and UDP outer output pass through IPv4 local-output/netfilter.
 - `dtunctl peer-list` dumps all peers, and peer commands support JSON output.
 

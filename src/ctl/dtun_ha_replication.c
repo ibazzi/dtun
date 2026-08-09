@@ -181,12 +181,13 @@ int dtun_ha_replica_server(int fd, dtun_ha_state_t *state, const char *identity,
       memcmp(q.magic, REPL_REQUEST_MAGIC, 4))
     return -1;
   m = dtun_ha_member_find(state, q.hub_id);
-  if (!m || !m->enabled ||
+  if (!m ||
       verify_data(m->public_key, &q, offsetof(replica_request_t, signature),
                   q.signature) < 0)
     return -1;
   snprintf(replicated_hub_id, DTUN_HA_ID_LEN, "%s", q.hub_id);
-  if (m->role == DTUN_HA_LEARNER) {
+  if (m->enabled && m->lifecycle == DTUN_HA_MEMBER_ACTIVE &&
+      m->role == DTUN_HA_LEARNER) {
     m->role = DTUN_HA_VOTER;
     state->manifest_version++;
     state->commit_index++;

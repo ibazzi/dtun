@@ -18,6 +18,56 @@
     }                                                                          \
   } while (0)
 
+static int admin_roundtrip(dtun_ha_state_t *state, const char *state_path,
+                           const char *server_key, uint8_t action,
+                           const char *target) {
+  struct sockaddr_in address = {.sin_family = AF_INET,
+                                .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+  socklen_t length = sizeof(address);
+  dtun_ha_admin_reply_t reply;
+  int listener = socket(AF_INET, SOCK_STREAM, 0), status;
+  pid_t child;
+
+  if (listener < 0 ||
+      bind(listener, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+      listen(listener, 1) < 0 ||
+      getsockname(listener, (struct sockaddr *)&address, &length) < 0)
+    return -1;
+  state->members[0].address = address.sin_addr;
+  state->members[0].ha_port = ntohs(address.sin_port);
+  if (dtun_ha_state_save(state_path, state) < 0) {
+    close(listener);
+    return -1;
+  }
+  child = fork();
+  if (child < 0) {
+    close(listener);
+    return -1;
+  }
+  if (!child) {
+    dtun_ha_state_t current;
+    int fd = accept(listener, NULL, NULL);
+    int result =
+        fd < 0 || dtun_ha_state_load(state_path, &current) < 0
+            ? -1
+            : dtun_ha_admin_server(fd, &current, state_path, server_key);
+    if (fd >= 0)
+      close(fd);
+    close(listener);
+    _exit(result ? 1 : 0);
+  }
+  close(listener);
+  int result =
+      dtun_ha_admin_client(address.sin_addr, ntohs(address.sin_port), state,
+                           server_key, action, target, 0, &reply);
+  if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+      WEXITSTATUS(status))
+    return -1;
+  if (result < 0)
+    return result;
+  return dtun_ha_state_load(state_path, state);
+}
+
 int main(void) {
   char dir[] = "/tmp/dtun-ha-join-XXXXXX", server_key[256], client_key[256],
        state_path[256];
@@ -36,6 +86,7 @@ int main(void) {
   memset(&state, 0, sizeof(state));
   dtun_ha_random_id(state.cluster_id, 16);
   strcpy(state.local_hub_id, "primary");
+  strcpy(state.primary_hub_id, "primary");
   strcpy(state.leader_id, "primary");
   state.term = 1;
   state.member_count = 1;
@@ -87,6 +138,24 @@ int main(void) {
   CHECK(dtun_ha_state_load(state_path, &loaded) == 0 &&
         loaded.invites[0].status == 1 &&
         !memcmp(loaded.invites[0].claimed_key, client_pub, 32));
+  loaded.member_count = 2;
+  strcpy(loaded.members[1].hub_id, "backup");
+  memcpy(loaded.members[1].public_key, client_pub, 32);
+  loaded.members[1].enabled = 1;
+  loaded.members[1].role = DTUN_HA_VOTER;
+  loaded.members[1].lifecycle = DTUN_HA_MEMBER_ACTIVE;
+  CHECK(admin_roundtrip(&loaded, state_path, server_key, DTUN_HA_ADMIN_DISABLE,
+                        "backup") == 0);
+  CHECK(loaded.members[1].lifecycle == DTUN_HA_MEMBER_DISABLED &&
+        !loaded.members[1].enabled);
+  CHECK(admin_roundtrip(&loaded, state_path, server_key, DTUN_HA_ADMIN_ENABLE,
+                        "backup") == 0);
+  CHECK(loaded.members[1].lifecycle == DTUN_HA_MEMBER_ACTIVE &&
+        loaded.members[1].enabled && loaded.members[1].role == DTUN_HA_LEARNER);
+  CHECK(admin_roundtrip(&loaded, state_path, server_key, DTUN_HA_ADMIN_KICK,
+                        "backup") == 0);
+  CHECK(loaded.members[1].lifecycle == DTUN_HA_MEMBER_EVICTED &&
+        !loaded.members[1].enabled);
   unlink(state_path);
   unlink(server_key);
   unlink(client_key);

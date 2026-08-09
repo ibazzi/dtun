@@ -248,6 +248,13 @@ sudo dtunctl ha invite create --hub-id hub-backup-1 \
 sudo dtunctl ha join --config /etc/dtun/dtun.conf
 ```
 
+HA administration supports `ha status --format json`, `ha member
+disable|enable|kick --hub-id ID`, `ha leave`, and the destructive `ha rebuild
+--force`. Membership changes are authorized by the fixed Primary. `kick`
+permanently revokes the old identity; the removed `member remove` command is
+not accepted. Stop the local daemon before `leave` or `rebuild`. A rebuild
+rotates the cluster ID and identity key without deleting Hub business state.
+
 New address, node-ID, and tunnel/session allocations are acknowledged only
 after replication. During direct-pair isolation, existing identities may
 reconnect and continue forwarding, but brand-new allocations are rejected
@@ -313,15 +320,18 @@ dmesg | grep -i dtun
 Inspect one peer or dump the interface peer snapshot:
 
 ```sh
-IFINDEX=$(cat /sys/class/net/dtun0/ifindex)
-sudo ./build/dtunctl peer-get --ifindex "$IFINDEX" --tunnel-id 100
-sudo ./build/dtunctl peer-list --ifindex "$IFINDEX"
-sudo ./build/dtunctl peer-list --ifindex "$IFINDEX" --format json
+sudo ./build/dtunctl peer-get --ifname dtun0 --tunnel-id 100
+sudo ./build/dtunctl peer-list --ifname dtun0
+sudo ./build/dtunctl peer-list --format json
 ```
 
 Peer commands default to human-readable output; automation should explicitly
 select `--format json`. `raw_up` and `udp_up` reflect each path's adaptive
 EWMA/RTTVAR threshold.
+
+Peer commands select interfaces by `--ifname`, not `--ifindex`. With no
+selector, `peer-list` discovers every dtun interface and combines their peers;
+JSON results use the `ifname` field.
 
 Common issues:
 

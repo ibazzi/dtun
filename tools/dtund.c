@@ -1,3 +1,4 @@
+#include "../../src/ctl/dtun_ha_defaults.h"
 #include "../../src/ctl/dtun_ha_state.h"
 #include "../../src/ctl/dtun_netlink.h"
 #include "../../src/ctl/dtun_proto.h"
@@ -1212,6 +1213,19 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     if (config->ha_enabled) {
       dtun_ha_state_t state;
       int state_loaded = dtun_ha_state_load(config->ha_state_file, &state) == 0;
+      dtun_ha_member_t *local_member =
+          state_loaded ? dtun_ha_member_find(&state, state.local_hub_id) : NULL;
+      if (state_loaded && (!local_member || !local_member->enabled ||
+                           local_member->lifecycle != DTUN_HA_MEMBER_ACTIVE)) {
+        dtun_log_warn("[dtund HA] Local Hub '%s' is %s; stopping data plane",
+                      state.local_hub_id,
+                      local_member &&
+                              local_member->lifecycle == DTUN_HA_MEMBER_DISABLED
+                          ? "disabled"
+                          : "evicted");
+        demoted = 1;
+        break;
+      }
       if (state_loaded && strcmp(state.leader_id, state.local_hub_id)) {
         if (config->ha_role && !strcmp(config->ha_role, "primary") &&
             time(NULL) - ha_active_since <= config->failback_probation_time) {
@@ -1671,6 +1685,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
   uint64_t applied_hub_term = 0;
   int have_lease = 0, refresh_failures = 0;
   int registered_once = 0;
+  int bootstrap_attempted = 0;
   int result = 1;
   dtund_spoke_ha_t spoke_ha;
 
@@ -1918,7 +1933,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
       refresh_failures = 0;
     }
 
-    if (!have_lease &&
+    if (!have_lease && bootstrap_attempted &&
         dtund_spoke_ha_failover(&spoke_ha, &hub_control, dtun_monotonic_ms())) {
       char endpoint[INET_ADDRSTRLEN];
       inet_ntop(AF_INET, &hub_control.sin_addr, endpoint, sizeof(endpoint));
@@ -1934,8 +1949,9 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
      * has no valid in-flight response yet, so discard stale control
      * datagrams before creating its new nonce. */
     if (!have_lease) {
-      timeout.tv_sec = config->timeout > 0 ? config->timeout : 5;
-      timeout.tv_usec = 0;
+      uint32_t registration_rto = dtun_liveness_rto_ms(&spoke_ha.leader_health);
+      timeout.tv_sec = registration_rto / 1000;
+      timeout.tv_usec = (suseconds_t)(registration_rto % 1000) * 1000;
       (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                        sizeof(timeout));
       for (;;) {
@@ -2117,14 +2133,17 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
     }
 
   attempt_done:
+    bootstrap_attempted = 1;
     dtrg_msg_free(&challenge);
     dtrg_msg_free(&ack);
     dtrg_msg_free(&sync);
     if (config->once)
       break;
-    if (!success)
+    if (!success) {
+      dtund_spoke_ha_missed(&spoke_ha, dtun_monotonic_ms());
       dtun_log_err("[dtund Spoke] Registration failed; retaining existing "
                    "link and retrying");
+    }
     if (g_running)
       sleep(1);
   }
@@ -2222,6 +2241,36 @@ int main(int argc, char **argv) {
       if (dtun_ha_state_load(config.ha_state_file, &ha_state) < 0) {
         dtun_log_err("Failed to load HA state");
         result = 1;
+        goto daemon_done;
+      }
+      dtun_ha_member_t *local_member =
+          dtun_ha_member_find(&ha_state, ha_state.local_hub_id);
+      if (!local_member || local_member->lifecycle == DTUN_HA_MEMBER_EVICTED) {
+        dtun_log_warn(
+            "[dtund HA] Local Hub was kicked; removing local HA files");
+        unlink(config.ha_state_file);
+        unlink(config.ha_identity_key);
+        unlink(config.ha_config ? config.ha_config : DTUN_HA_CONFIG_PATH);
+        result = 0;
+        goto daemon_done;
+      }
+      if (!local_member->enabled ||
+          local_member->lifecycle == DTUN_HA_MEMBER_DISABLED) {
+        dtun_log_info(
+            "[dtund HA] Local Hub '%s' is disabled; management-only mode",
+            ha_state.local_hub_id);
+        while (g_running) {
+          usleep(200000);
+          if (dtun_ha_state_load(config.ha_state_file, &ha_state) < 0)
+            continue;
+          local_member = dtun_ha_member_find(&ha_state, ha_state.local_hub_id);
+          if (!local_member ||
+              local_member->lifecycle != DTUN_HA_MEMBER_DISABLED)
+            break;
+        }
+        if (g_running)
+          goto ha_cycle;
+        result = 0;
         goto daemon_done;
       }
       if (strcmp(ha_state.leader_id, ha_state.local_hub_id)) {

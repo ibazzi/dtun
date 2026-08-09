@@ -66,7 +66,7 @@ echo "  raw counter: $br -> $ar, udp counter: $bu -> $au"
 [ $((ar - br)) -ge 15 ] && ok "data carried on raw protocol 253" || fail "raw not used for data"
 
 section "UDP fallback after clearing raw candidate"
-ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
+ip netns exec "$A" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 \
 	--raw 0.0.0.0 --udp 172.30.91.1:49000
 # Path health is per side: the hub keeps replying over raw until its own
 # raw_seen for A expires (path_timeout_ms defaults to 3s), and A rejects those raw
@@ -74,7 +74,7 @@ ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
 # to go stale before asserting UDP-only data.
 stale=0
 for i in $(seq 1 20); do
-	if ip netns exec "$HUB" "$CTL" peer-get --ifindex "$(ifindex "$HUB")" \
+	if ip netns exec "$HUB" "$CTL" peer-get --ifname dtun0 \
 		--format json --tunnel-id 101 2>/dev/null | grep -q '"raw_up":false'; then
 		stale=1
 		break
@@ -103,7 +103,7 @@ fi
 peer_get "$A" 100 | grep -q '"raw_up":false' && ok "raw_up false" || fail "raw_up not false"
 
 section "raw recovery after restoring candidate"
-ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
+ip netns exec "$A" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 \
 	--raw 172.30.91.1 --udp 172.30.91.1:49000
 recovered=0
 for i in $(seq 1 25); do
@@ -123,19 +123,19 @@ echo "  raw counter: $br -> $ar, udp counter: $bu -> $au"
 [ $((ar - br)) -ge 15 ] && ok "data back on raw after recovery" || fail "raw not preferred after recovery"
 
 section "daemon-configured Hub fallback with direct candidates cleared"
-ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
+ip netns exec "$A" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 \
 	--raw 0.0.0.0 --udp 0.0.0.0:0
 # The Hub must reply over UDP while the spoke exercises its configured
 # fallback; a still-healthy Raw reply would be rejected by the cleared spoke
 # candidate before the Hub-side path timeout expires.
-ip netns exec "$HUB" "$CTL" peer-set --ifindex "$(ifindex "$HUB")" --tunnel-id 101 \
+ip netns exec "$HUB" "$CTL" peer-set --ifname dtun0 --tunnel-id 101 \
 	--raw 0.0.0.0 --udp 172.30.91.2:49000
 if ping_ok "$A" "$HUB_I" 5; then
 	ok "Hub fallback carried traffic after peer candidates were cleared"
 else
 	fail "daemon-configured Hub fallback did not carry traffic"
 fi
-ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
+ip netns exec "$A" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 \
 	--raw 172.30.91.1 --udp 172.30.91.1:49000
 
 section "relay path (spoke with no raw/UDP candidate, hub address configured)"
@@ -157,9 +157,9 @@ ip -n dtc-r addr add 10.99.0.5/24 dev dtun0
 ip -n dtc-h2 link set dtun0 up; ip -n dtc-r link set dtun0 up
 IFH2=$(ip -n dtc-h2 link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
 IFR=$(ip -n dtc-r link show dtun0 | sed -n 's/^\([0-9]*\):.*/\1/p')
-ip netns exec dtc-h2 "$CTL" peer-add --ifindex "$IFH2" --tunnel-id 100 --remote-tunnel-id 101 \
+ip netns exec dtc-h2 "$CTL" peer-add --ifname dtun0 --tunnel-id 100 --remote-tunnel-id 101 \
 	--node-id 5 --raw 172.30.92.2 --udp 172.30.92.2:49000 --key "$KEY"
-ip netns exec dtc-r "$CTL" peer-add --ifindex "$IFR" --tunnel-id 101 --remote-tunnel-id 100 \
+ip netns exec dtc-r "$CTL" peer-add --ifname dtun0 --tunnel-id 101 --remote-tunnel-id 100 \
 	--node-id 1 --raw 0.0.0.0 --udp 0.0.0.0:0 --key "$KEY"
 ip netns exec dtc-h2 "$CTL" route-add --ifindex "$IFH2" --tunnel-id 100 --prefix 10.99.0.5/32
 ip netns exec dtc-r "$CTL" route-add --ifindex "$IFR" --tunnel-id 101 --prefix 10.99.0.1/32
@@ -188,7 +188,7 @@ ip -n "$A" route del 10.21.0.0/24 dev dtun0
 section "malformed and replayed frame rejection"
 # Point A's UDP candidate at B's spare port so crafted frames exercise ingress
 # validation without colliding with the real data path.
-ip netns exec "$A" "$CTL" peer-set --ifindex "$(ifindex "$A")" --tunnel-id 100 \
+ip netns exec "$A" "$CTL" peer-set --ifname dtun0 --tunnel-id 100 \
 	--raw 0.0.0.0 --udp 172.30.91.3:49001
 sleep 1
 before_rx=$(rx_pkts "$A")

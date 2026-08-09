@@ -94,6 +94,9 @@ int dtund_spoke_ha_load(dtund_spoke_ha_t *s, const char *path,
     return -1;
   *s = file.state;
   dtun_liveness_init(&s->leader_health, DTUN_LIVENESS_CRITICAL, now_ms);
+  /* A persisted switch request belongs to the old process.  A new process
+   * always starts by trying the configured bootstrap Primary. */
+  s->force_switch = 0;
   return 0;
 }
 
