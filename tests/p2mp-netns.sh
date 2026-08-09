@@ -83,7 +83,6 @@ bind_address = 0.0.0.0
 bind_port = 49001
 pool = 10.99.0.0/24
 state_file = $OUT/hub.state
-peer_timeout = 5
 EOF
 
 spoke_config() {
@@ -101,7 +100,6 @@ psk = $KEY
 hub_address = 172.30.90.1
 hub_port = 49001
 local_port = 0
-interval = 2
 timeout = 2
 once = false
 EOF

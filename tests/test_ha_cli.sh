@@ -50,6 +50,7 @@ fi
 test ! -s "$TMP/error.out"
 grep -q 'invalid --format' "$TMP/error.err"
 "$CTL" ha status --state-file "$TMP/state" | grep -q 'Mode: bootstrap'
-"$CTL" ha invite list --state-file "$TMP/state" | grep -q 'hub=hub-backup-1 weight=900 status=unused'
+"$CTL" ha invite list --state-file "$TMP/state" |
+    grep -q 'hub=hub-backup-1 weight=900 status=unused'
 
 echo "dtunctl HA configuration tests passed"

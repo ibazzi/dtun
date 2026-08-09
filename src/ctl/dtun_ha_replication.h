@@ -13,5 +13,6 @@ int dtun_ha_replica_client(struct in_addr leader, uint16_t port,
                            const char *identity_key_path,
                            const char *ha_state_path,
                            const char *hub_state_path);
+uint64_t dtun_ha_last_leader_contact_ms(void);
 
 #endif

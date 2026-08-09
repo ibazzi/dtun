@@ -10,7 +10,7 @@
 
 ```sh
 ip link add dtun0 type dtun local 192.0.2.10 udp_port 49000 node_id 1 \
-  hub 192.0.2.1 hub_port 49000 probe_interval_ms 1000 path_timeout_ms 3000
+  hub 192.0.2.1 hub_port 49000
 ```
 
 `local`、`udp_port` 和 `node_id` 是必填项；`hub`、`hub_port` 可选，未提供

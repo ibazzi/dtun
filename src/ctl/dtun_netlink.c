@@ -183,6 +183,42 @@ static int parse_peer_status(const void *payload, size_t payload_len,
     case DTUN_A_SELECTED_PATH:
       status->selected_path = *(uint8_t *)RTA_DATA(attr);
       break;
+    case DTUN_A_RAW_HEALTH:
+      status->raw_health = *(uint8_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_UDP_HEALTH:
+      status->udp_health = *(uint8_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_RAW_SRTT_US:
+      memcpy(&status->raw_srtt_us, RTA_DATA(attr), sizeof(uint64_t));
+      break;
+    case DTUN_A_UDP_SRTT_US:
+      memcpy(&status->udp_srtt_us, RTA_DATA(attr), sizeof(uint64_t));
+      break;
+    case DTUN_A_RAW_RTTVAR_US:
+      memcpy(&status->raw_rttvar_us, RTA_DATA(attr), sizeof(uint64_t));
+      break;
+    case DTUN_A_UDP_RTTVAR_US:
+      memcpy(&status->udp_rttvar_us, RTA_DATA(attr), sizeof(uint64_t));
+      break;
+    case DTUN_A_RAW_LOSS_PPM:
+      status->raw_loss_ppm = *(uint32_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_UDP_LOSS_PPM:
+      status->udp_loss_ppm = *(uint32_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_RAW_THRESHOLD_MS:
+      status->raw_threshold_ms = *(uint32_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_UDP_THRESHOLD_MS:
+      status->udp_threshold_ms = *(uint32_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_RAW_LAST_ACK_MS:
+      status->raw_last_ack_ms = *(uint32_t *)RTA_DATA(attr);
+      break;
+    case DTUN_A_UDP_LAST_ACK_MS:
+      status->udp_last_ack_ms = *(uint32_t *)RTA_DATA(attr);
+      break;
     }
     attr = RTA_NEXT(attr, len);
   }
@@ -356,8 +392,7 @@ uint32_t dtun_link_get_ifindex(const char *ifname) {
 
 int dtun_link_create(const char *ifname, struct in_addr local_addr,
                      uint16_t udp_port, uint64_t node_id,
-                     struct in_addr hub_addr, uint16_t hub_port,
-                     uint32_t probe_interval_ms, uint32_t path_timeout_ms) {
+                     struct in_addr hub_addr, uint16_t hub_port) {
   uint32_t existing = dtun_link_get_ifindex(ifname);
   if (existing > 0) {
     dtun_link_delete_by_name(ifname);
@@ -390,10 +425,6 @@ int dtun_link_create(const char *ifname, struct in_addr local_addr,
       uint16_t uport = htons(udp_port);
       add_attr(n, sizeof(buf), IFLA_DTUN_UDP_PORT, &uport, 2);
       add_attr(n, sizeof(buf), IFLA_DTUN_NODE_ID, &node_id, 8);
-      add_attr(n, sizeof(buf), IFLA_DTUN_PROBE_INTERVAL_MS, &probe_interval_ms,
-               sizeof(probe_interval_ms));
-      add_attr(n, sizeof(buf), IFLA_DTUN_PATH_TIMEOUT_MS, &path_timeout_ms,
-               sizeof(path_timeout_ms));
       if (hub_addr.s_addr) {
         uint16_t hport = htons(hub_port);
         add_attr(n, sizeof(buf), IFLA_DTUN_HUB, &hub_addr.s_addr, 4);
@@ -685,6 +716,48 @@ int dtun_nl_hub_set(uint32_t ifindex, struct in_addr hub_addr,
   off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_HUB_PORT,
                         &port_be, sizeof(port_be));
   return genl_request(dtun_genl_family_id, DTUN_CMD_HUB_SET, attrs, off, NULL,
+                      NULL);
+}
+
+int dtun_nl_hub_migrate(uint32_t ifindex, struct in_addr hub_addr,
+                        uint16_t hub_port, uint64_t term) {
+  char attrs[128];
+  int off = 0;
+  uint16_t port_be;
+  int err = dtun_nl_init();
+
+  if (err < 0)
+    return err;
+  if (!ifindex || !hub_addr.s_addr || !hub_port || !term)
+    return -EINVAL;
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_IFINDEX,
+                        &ifindex, sizeof(ifindex));
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_HUB_ADDR,
+                        &hub_addr.s_addr, sizeof(hub_addr.s_addr));
+  port_be = htons(hub_port);
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_HUB_PORT,
+                        &port_be, sizeof(port_be));
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_HUB_TERM,
+                        &term, sizeof(term));
+  return genl_request(dtun_genl_family_id, DTUN_CMD_HUB_MIGRATE, attrs, off,
+                      NULL, NULL);
+}
+
+int dtun_nl_role_set(uint32_t ifindex, int operational) {
+  char attrs[64];
+  int off = 0;
+  uint8_t value = operational ? 1 : 0;
+  int err = dtun_nl_init();
+
+  if (err < 0)
+    return err;
+  if (!ifindex)
+    return -EINVAL;
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_IFINDEX,
+                        &ifindex, sizeof(ifindex));
+  off += pack_dtun_attr(attrs + off, sizeof(attrs) - off, DTUN_A_OPERATIONAL,
+                        &value, sizeof(value));
+  return genl_request(dtun_genl_family_id, DTUN_CMD_ROLE_SET, attrs, off, NULL,
                       NULL);
 }
 

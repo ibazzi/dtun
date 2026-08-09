@@ -22,13 +22,12 @@ int main(void) {
   CHECK(fd >= 0);
   close(fd);
   unlink(path);
-  dtund_spoke_ha_init(&state, 100);
+  dtund_spoke_ha_init(&state, 100000);
   memset(&message, 0, sizeof(message));
   memset(hubs, 0, sizeof(hubs));
   message.kind = DTRG_HUB_LIST;
   message.term = 2;
   message.ha_mode = DTRG_HA_MODE_QUORUM;
-  message.failover_timeout = 30;
   message.hub_count = 3;
   message.hubs = hubs;
   strcpy(hubs[0].hub_id, "primary");
@@ -41,16 +40,18 @@ int main(void) {
   hubs[0].weight = 1000;
   hubs[1].weight = 800;
   hubs[2].weight = 900;
-  CHECK(dtund_spoke_ha_update(&state, &message, 100) == 0);
+  CHECK(dtund_spoke_ha_update(&state, &message, 100000) == 0);
   memset(&current, 0, sizeof(current));
   current.sin_family = AF_INET;
   current.sin_addr = hubs[0].address;
   current.sin_port = htons(49001);
-  CHECK(!dtund_spoke_ha_failover(&state, &current, 129));
-  CHECK(dtund_spoke_ha_failover(&state, &current, 130));
+  for (int i = 0; i < 4; i++)
+    dtund_spoke_ha_missed(&state, 100200 + (uint64_t)i * 100);
+  CHECK(!dtund_spoke_ha_failover(&state, &current, 100599));
+  CHECK(dtund_spoke_ha_failover(&state, &current, 100600));
   CHECK(current.sin_addr.s_addr == hubs[2].address.s_addr);
   CHECK(dtund_spoke_ha_save(&state, path) == 0);
-  CHECK(dtund_spoke_ha_load(&loaded, path, 200) == 0 && loaded.term == 2 &&
+  CHECK(dtund_spoke_ha_load(&loaded, path, 200000) == 0 && loaded.term == 2 &&
         loaded.hub_count == 3);
   unlink(path);
   puts("Spoke HA selection/persistence tests passed");

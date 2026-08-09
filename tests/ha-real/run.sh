@@ -235,9 +235,20 @@ done
 pass "three Hub state replicas match"
 
 section "Weighted quorum failover"
+FAILOVER_START_MS=$(date +%s%3N)
 remote 0 "systemctl stop dtun-ha-real-primary.service"
+MIGRATION_MS=
+while (( $(date +%s%3N) - FAILOVER_START_MS <= 2000 )); do
+    if sudo timeout 0.2s ip netns exec dtun-ha-real-local \
+        ping -c 1 -W 1 10.77.0.1 >/dev/null 2>&1; then
+        MIGRATION_MS=$(( $(date +%s%3N) - FAILOVER_START_MS ))
+        break
+    fi
+    sleep 0.05
+done
+[[ -n $MIGRATION_MS ]] || die "local Spoke migration exceeded 2000ms"
+pass "local Spoke data plane migrated in ${MIGRATION_MS}ms"
 wait_remote 1 "backup-1 elected by weight" "/tmp/dtun-ha-real-src/build/dtunctl ha status --state-file /tmp/dtun-ha-real/ha/state | grep -q 'Leader: hub-backup-1'" 20
-sleep 6
 sudo ip netns exec dtun-ha-real-local ping -c 3 -W 2 10.77.0.1 >/dev/null || die "local Spoke did not migrate"
 remote 1 "ip netns exec dtun-ha-real-s1 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-1 did not migrate"
 remote 2 "ip netns exec dtun-ha-real-s2 ping -c 3 -W 2 10.77.0.1 >/dev/null" || die "Spoke-2 did not migrate"

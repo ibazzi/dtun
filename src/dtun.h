@@ -22,8 +22,8 @@
 #define DTUN_VERSION 1
 #define DTUN_TAG_LEN 16
 #define DTUN_KEY_LEN 32
-#define DTUN_PROBE_INTERVAL_MS 1000U
-#define DTUN_PATH_TIMEOUT_MS 3000U
+#define DTUN_PROBE_MAGIC 0x44545032U
+#define DTUN_LOSS_Q16_TWO_PERCENT 1311U
 
 enum dtun_frame_type {
   DTUN_FRAME_DATA = 1,
@@ -57,6 +57,34 @@ struct dtun_hdr {
   u8 tag[DTUN_TAG_LEN];
 } __packed;
 
+struct dtun_probe_payload {
+  __be32 magic;
+  __be64 probe_id;
+} __packed;
+
+enum dtun_health_state {
+  DTUN_HEALTH_UNKNOWN = 0,
+  DTUN_HEALTH_HEALTHY = 1,
+  DTUN_HEALTH_SUSPECT = 2,
+  DTUN_HEALTH_OFFLINE = 3,
+};
+
+struct dtun_path_health {
+  u64 srtt_us;
+  u64 rttvar_us;
+  u64 probe_id;
+  u64 probe_sent_ns;
+  unsigned long last_ack;
+  unsigned long next_probe;
+  unsigned long duplicate_probe;
+  u32 loss_q16;
+  u32 failed_rounds;
+  u8 initialized;
+  u8 pending;
+  u8 duplicate_pending;
+  u8 state;
+};
+
 struct dtun_prefix {
   struct list_head list;
   __be32 addr;
@@ -82,8 +110,8 @@ struct dtun_peer {
   __be16 direct_udp_port;
   u64 candidate_generation;
   bool dynamic_raw;
-  unsigned long raw_seen;
-  unsigned long udp_seen;
+  struct dtun_path_health raw_health;
+  struct dtun_path_health udp_health;
   atomic64_t tx_seq;
   u64 rx_highest;
   u64 rx_window[DTUN_REPLAY_BITMAP_LENS];
@@ -101,9 +129,9 @@ struct dtun_dev {
   __be16 hub_port;
   spinlock_t hub_lock;
   u64 node_id;
+  bool operational;
   struct socket *udp_sock;
-  u32 probe_interval_ms;
-  u32 path_timeout_ms;
+  u64 hub_term;
   spinlock_t peer_lock;
   struct list_head peers;
   struct delayed_work probe_work;
@@ -122,6 +150,8 @@ enum dtun_nl_cmd {
   DTUN_CMD_PEER_LIST,
   DTUN_CMD_REBIND,
   DTUN_CMD_HUB_SET,
+  DTUN_CMD_HUB_MIGRATE,
+  DTUN_CMD_ROLE_SET,
   __DTUN_CMD_MAX,
 };
 #define DTUN_CMD_MAX (__DTUN_CMD_MAX - 1)
@@ -151,6 +181,20 @@ enum dtun_nl_attr {
   DTUN_A_SELECTED_PATH,
   DTUN_A_HUB_ADDR,
   DTUN_A_HUB_PORT,
+  DTUN_A_HUB_TERM,
+  DTUN_A_OPERATIONAL,
+  DTUN_A_RAW_HEALTH,
+  DTUN_A_UDP_HEALTH,
+  DTUN_A_RAW_SRTT_US,
+  DTUN_A_UDP_SRTT_US,
+  DTUN_A_RAW_RTTVAR_US,
+  DTUN_A_UDP_RTTVAR_US,
+  DTUN_A_RAW_LOSS_PPM,
+  DTUN_A_UDP_LOSS_PPM,
+  DTUN_A_RAW_THRESHOLD_MS,
+  DTUN_A_UDP_THRESHOLD_MS,
+  DTUN_A_RAW_LAST_ACK_MS,
+  DTUN_A_UDP_LAST_ACK_MS,
   __DTUN_A_MAX,
 };
 #define DTUN_A_MAX (__DTUN_A_MAX - 1)
@@ -162,8 +206,8 @@ enum dtun_link_attr {
   IFLA_DTUN_NODE_ID,
   IFLA_DTUN_HUB,
   IFLA_DTUN_HUB_PORT,
-  IFLA_DTUN_PROBE_INTERVAL_MS,
-  IFLA_DTUN_PATH_TIMEOUT_MS,
+  IFLA_DTUN_PROBE_INTERVAL_MS_RESERVED,
+  IFLA_DTUN_PATH_TIMEOUT_MS_RESERVED,
   __IFLA_DTUN_MAX,
 };
 #define IFLA_DTUN_MAX (__IFLA_DTUN_MAX - 1)
@@ -184,5 +228,17 @@ void dtun_genl_unregister(void);
 void dtun_genl_observed_peer(struct dtun_dev *d, struct dtun_peer *peer,
                              __be32 addr, __be16 port,
                              enum dtun_transport transport);
+void dtun_path_health_init(struct dtun_path_health *health);
+u32 dtun_path_probe_interval_ms(const struct dtun_peer *peer,
+                                const struct dtun_path_health *health);
+u32 dtun_path_rto_ms(const struct dtun_peer *peer,
+                     const struct dtun_path_health *health);
+u32 dtun_path_offline_ms(const struct dtun_peer *peer,
+                         const struct dtun_path_health *health);
+u32 dtun_path_loss_ppm(const struct dtun_path_health *health);
+void dtun_path_note_ack(struct dtun_peer *peer, struct dtun_path_health *health,
+                        u64 probe_id);
+void dtun_path_tick(struct dtun_peer *peer, struct dtun_path_health *health);
+bool dtun_path_available(const struct dtun_path_health *health);
 
 #endif

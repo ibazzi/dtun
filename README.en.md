@@ -8,6 +8,9 @@ transports share the same session-ID, HMAC, and anti-replay format. The C daemon
 `dtund` provides Hub/Spoke registration, address allocation, and direct-peer
 synchronization.
 
+Optional Hub HA uses availability-first direct-pair failover for two Hubs and
+weighted majority election for three or more Hubs.
+
 > [!WARNING]
 > This project is not a production VPN. It authenticates payloads but does not
 > encrypt them, and all nodes share one PSK without per-node identity isolation.
@@ -19,6 +22,7 @@ synchronization.
   every peer. The default MTU is 1200.
 - Raw IP as the preferred path, followed by a configured UDP endpoint.
 - Authenticated UDP frames can update the source `IP:port` learned through NAT.
+- Probe cadence and offline thresholds adapt from EWMA/RTTVAR link quality.
 - The DTRG control plane supports lightweight refresh, candidate
   generations, persistent Hub
   state, offline lease expiry, and `/32` direct-peer synchronization between

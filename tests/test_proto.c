@@ -62,10 +62,10 @@ int main(void) {
   memset(hubs[0].public_key, 1, 32);
   memset(hubs[1].public_key, 2, 32);
   length = dtrg_pack_hub_list(key, 2, cluster_id, 7, DTRG_HA_MODE_DIRECT_PAIR,
-                              30, hubs, 2, packet, sizeof(packet));
+                              hubs, 2, packet, sizeof(packet));
   CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
   CHECK(message.kind == DTRG_HUB_LIST && message.term == 7 &&
-        message.hub_count == 2 && message.failover_timeout == 30 &&
+        message.hub_count == 2 &&
         !strcmp(message.hubs[1].hub_id, "hub-backup-1") &&
         message.hubs[1].weight == 900);
   dtrg_msg_free(&message);
@@ -85,13 +85,15 @@ int main(void) {
   CHECK(message.kind == DTRG_CONFIRM);
   dtrg_msg_free(&message);
 
-  length = dtrg_pack_ack(key, 2, 100, 101, address, 24, 49000, nonce,
-                         lease_token, 9, packet, sizeof(packet));
+  length =
+      dtrg_pack_ack(key, 2, 100, 101, address, 24, 49000, nonce, lease_token, 9,
+                    7, "hub-primary", packet, sizeof(packet));
   CHECK(length > 0);
   CHECK(dtrg_parse(key, packet, (size_t)length, &message) == 0);
   CHECK(message.kind == DTRG_ACK && message.tunnel_id == 100 &&
         message.remote_tunnel_id == 101 && message.data_port == 49000 &&
-        message.epoch == 9 &&
+        message.epoch == 9 && message.term == 7 &&
+        !strcmp(message.leader_id, "hub-primary") &&
         memcmp(message.lease_token, lease_token, sizeof(lease_token)) == 0);
   dtrg_msg_free(&message);
 
@@ -133,17 +135,18 @@ int main(void) {
   dtrg_msg_free(&message);
 
   length = dtrg_pack_refresh_ack(key, 2, lease_token, 11, 10, raw, 41002,
-                                 DTRG_REFRESH_SNAPSHOT, 2, peers, 2, packet,
-                                 sizeof(packet));
+                                 DTRG_REFRESH_SNAPSHOT, 2, 7, "hub-primary",
+                                 49000, peers, 2, packet, sizeof(packet));
   CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
   CHECK(message.kind == DTRG_REFRESH_ACK && message.epoch == 10 &&
         message.observed_port == 41002 && message.peer_count == 2 &&
+        message.term == 7 && message.data_port == 49000 &&
         message.peers[1].generation == 8);
   dtrg_msg_free(&message);
 
   length = dtrg_pack_refresh_ack(key, 2, lease_token, 11, 10, raw, 0,
-                                 DTRG_REFRESH_RE_REGISTER, 0, NULL, 0, packet,
-                                 sizeof(packet));
+                                 DTRG_REFRESH_RE_REGISTER, 0, 7, "hub-primary",
+                                 49000, NULL, 0, packet, sizeof(packet));
   CHECK(length > 0 && dtrg_parse(key, packet, (size_t)length, &message) == 0);
   CHECK(message.kind == DTRG_REFRESH_ACK &&
         message.flags == DTRG_REFRESH_RE_REGISTER && message.peer_count == 0);

@@ -1,4 +1,5 @@
 #include "dtun_ha_replication.h"
+#include "dtun_liveness.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -19,9 +20,18 @@
 #define REPL_REPLY_MAGIC "DTSN"
 #define REPL_MAX_HUB_STATE (4U * 1024U * 1024U)
 
+static uint64_t last_leader_contact_ms;
+
+uint64_t dtun_ha_last_leader_contact_ms(void) {
+  return __atomic_load_n(&last_leader_contact_ms, __ATOMIC_RELAXED);
+}
+
 typedef struct __attribute__((packed)) {
   char magic[4];
   char hub_id[DTUN_HA_ID_LEN];
+  uint64_t known_term;
+  uint64_t known_commit_index;
+  uint8_t known_hub_digest[32];
   uint8_t nonce[16];
   uint8_t signature[64];
 } replica_request_t;
@@ -73,6 +83,20 @@ static int connect_timeout(int fd, const struct sockaddr *address,
     return -1;
   }
   return fcntl(fd, F_SETFL, flags);
+}
+
+static int set_io_timeout(int fd, int timeout_ms) {
+  struct timeval timeout = {
+      .tv_sec = timeout_ms / 1000,
+      .tv_usec = (timeout_ms % 1000) * 1000,
+  };
+
+  return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) <
+                     0 ||
+                 setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                            sizeof(timeout)) < 0
+             ? -1
+             : 0;
 }
 
 static EVP_PKEY *load_private(const char *path) {
@@ -136,7 +160,8 @@ static void snapshot_digest(const replica_reply_t *r, const dtun_ha_state_t *s,
   unsigned int n = 0;
   EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
   EVP_DigestUpdate(ctx, r, offsetof(replica_reply_t, signature));
-  EVP_DigestUpdate(ctx, s, sizeof(*s));
+  if (s)
+    EVP_DigestUpdate(ctx, s, sizeof(*s));
   if (hub_len)
     EVP_DigestUpdate(ctx, hub, hub_len);
   EVP_DigestFinal_ex(ctx, digest, &n);
@@ -151,6 +176,7 @@ int dtun_ha_replica_server(int fd, dtun_ha_state_t *state, const char *identity,
   dtun_ha_member_t *m;
   uint8_t *hub = NULL, digest[32];
   uint32_t hub_len = 0;
+  int metadata_only;
   if (io_all(fd, &q, sizeof(q), 0) < 0 ||
       memcmp(q.magic, REPL_REQUEST_MAGIC, 4))
     return -1;
@@ -165,16 +191,26 @@ int dtun_ha_replica_server(int fd, dtun_ha_state_t *state, const char *identity,
     state->manifest_version++;
     state->commit_index++;
   }
-  if (read_file(hub_path, &hub, &hub_len) < 0)
-    return -1;
-  SHA256(hub, hub_len, replicated_digest);
   memset(&r, 0, sizeof(r));
   memcpy(r.magic, REPL_REPLY_MAGIC, 4);
   r.term = htobe64(state->term);
   r.commit_index = htobe64(state->commit_index);
+  memcpy(r.nonce, q.nonce, 16);
+  if (read_file(hub_path, &hub, &hub_len) < 0)
+    return -1;
+  SHA256(hub, hub_len, replicated_digest);
+  metadata_only = be64toh(q.known_term) == state->term &&
+                  be64toh(q.known_commit_index) == state->commit_index &&
+                  !memcmp(q.known_hub_digest, replicated_digest, 32);
+  if (metadata_only) {
+    free(hub);
+    snapshot_digest(&r, NULL, NULL, 0, digest);
+    if (sign_data(identity, digest, sizeof(digest), r.signature) < 0)
+      return -1;
+    return io_all(fd, &r, sizeof(r), 1);
+  }
   r.ha_length = htonl(sizeof(*state));
   r.hub_length = htonl(hub_len);
-  memcpy(r.nonce, q.nonce, 16);
   snapshot_digest(&r, state, hub, hub_len, digest);
   if (sign_data(identity, digest, sizeof(digest), r.signature) < 0) {
     free(hub);
@@ -208,6 +244,21 @@ int dtun_ha_replica_client(struct in_addr leader, uint16_t port,
   memset(&q, 0, sizeof(q));
   memcpy(q.magic, REPL_REQUEST_MAGIC, 4);
   snprintf(q.hub_id, sizeof(q.hub_id), "%s", state->local_hub_id);
+  q.known_term = htobe64(state->term);
+  q.known_commit_index = htobe64(state->commit_index);
+  if (hub_path) {
+    uint8_t *known_hub = NULL;
+    uint32_t known_hub_len = 0;
+
+    if (read_file(hub_path, &known_hub, &known_hub_len) == 0) {
+      SHA256(known_hub, known_hub_len, q.known_hub_digest);
+      free(known_hub);
+    } else {
+      q.known_commit_index = 0;
+    }
+  } else {
+    memcpy(q.known_hub_digest, state->committed_hub_digest, 32);
+  }
   RAND_bytes(q.nonce, 16);
   if (sign_data(identity, &q, offsetof(replica_request_t, signature),
                 q.signature) < 0)
@@ -218,12 +269,25 @@ int dtun_ha_replica_client(struct in_addr leader, uint16_t port,
   dst.sin_addr = leader;
   dst.sin_port = htons(port);
   if (fd < 0 ||
-      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 2000) < 0 ||
-      io_all(fd, &q, sizeof(q), 1) < 0 || io_all(fd, &r, sizeof(r), 0) < 0 ||
+      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 400) < 0 ||
+      set_io_timeout(fd, 400) < 0 || io_all(fd, &q, sizeof(q), 1) < 0 ||
+      io_all(fd, &r, sizeof(r), 0) < 0 ||
       memcmp(r.magic, REPL_REPLY_MAGIC, 4) || memcmp(r.nonce, q.nonce, 16))
     goto out;
   ha_len = ntohl(r.ha_length);
   hub_len = ntohl(r.hub_length);
+  if (!ha_len && !hub_len) {
+    snapshot_digest(&r, NULL, NULL, 0, digest);
+    if (verify_data(leader_member->public_key, digest, sizeof(digest),
+                    r.signature) < 0 ||
+        be64toh(r.term) < state->term ||
+        be64toh(r.commit_index) < state->commit_index)
+      goto out;
+    __atomic_store_n(&last_leader_contact_ms, dtun_monotonic_ms(),
+                     __ATOMIC_RELAXED);
+    result = 0;
+    goto out;
+  }
   if (ha_len != sizeof(incoming) || hub_len > REPL_MAX_HUB_STATE)
     goto out;
   hub = malloc(hub_len ? hub_len : 1);
@@ -238,6 +302,8 @@ int dtun_ha_replica_client(struct in_addr leader, uint16_t port,
   snprintf(local_id, sizeof(local_id), "%s", state->local_hub_id);
   incoming.term = be64toh(r.term);
   incoming.commit_index = be64toh(r.commit_index);
+  if (strcmp(incoming.leader_id, target_id))
+    goto out;
   snprintf(incoming.local_hub_id, sizeof(incoming.local_hub_id), "%s",
            local_id);
   /* The endpoint that carried this authenticated exchange is known to be
@@ -249,10 +315,12 @@ int dtun_ha_replica_client(struct in_addr leader, uint16_t port,
     incoming_target->ha_port = port;
     incoming_target->endpoint_generation++;
   }
-  if (dtun_ha_atomic_write(hub_path, hub, hub_len, 0640) < 0 ||
+  if ((hub_path && dtun_ha_atomic_write(hub_path, hub, hub_len, 0640) < 0) ||
       dtun_ha_state_save(ha_path, &incoming) < 0)
     goto out;
   *state = incoming;
+  __atomic_store_n(&last_leader_contact_ms, dtun_monotonic_ms(),
+                   __ATOMIC_RELAXED);
   result = 0;
 out:
   if (fd >= 0)

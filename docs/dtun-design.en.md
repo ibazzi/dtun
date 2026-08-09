@@ -98,7 +98,8 @@ track IGMP membership, so this is all-peer flooding; multicast is also dropped
 when there are no peers. Every copy uses that peer's own tunnel IDs, sequence,
 HMAC, and path selection.
 
-Every second by default, a workqueue does the following for each peer:
+At each path's adaptive EWMA/RTTVAR cadence, a workqueue does the following for
+each peer:
 
 - sends a Raw PROBE when a Raw address is configured;
 - sends a UDP PROBE when a UDP `IP:port` is configured;
@@ -106,10 +107,10 @@ Every second by default, a workqueue does the following for each peer:
 
 The actual DATA selection rules are:
 
-1. Choose Raw IPv4 253 after an authenticated Raw round trip within the
-   three-second path timeout.
-2. Otherwise choose a directly observed authenticated UDP endpoint within the
-   same timeout.
+1. Choose Raw IPv4 253 after an authenticated Raw round trip within its
+   adaptive EWMA/RTTVAR threshold.
+2. Otherwise choose a directly observed authenticated UDP endpoint within its
+   adaptive threshold.
 3. Otherwise re-encapsulate through the node-1 Hub peer; the Hub then forwards
    according to the inner IPv4 route.
 
@@ -182,9 +183,10 @@ node/tunnel IDs, up to 128 node records, and every allocated Spoke-pair session.
 Each Hub-to-Spoke and Spoke-pair relationship gets distinct bidirectional tunnel
 IDs allocated from 100 and persisted.
 
-The Hub updates `last_seen` after valid CONFIRM and REFRESH messages. After
-`peer_timeout` it removes only the active kernel path and marks the node offline;
-address and tunnel/session allocations remain for `identity_retention` (86,400
+The Hub updates adaptive link health after valid CONFIRM and REFRESH messages.
+After multiple independent failed probe rounds exceed the EWMA/RTTVAR dynamic
+threshold, it removes only the active kernel path and marks the node offline.
+Address and tunnel/session allocations remain for `identity_retention` (86,400
 seconds by default). Reconnection with the same node ID reuses those sessions.
 The Hub rotates persisted lease tokens whenever it starts. An authenticated
 REFRESH carrying an old token receives a `RE_REGISTER` flag without disclosing
@@ -213,9 +215,9 @@ determine whether Raw enters its active window.
 - A Spoke creates its interface and Hub peer after the first valid ACK. Its local
   UDP port comes from its own `data_port`; the Hub destination data port comes
   from ACK.
-- A resident Spoke sends REFRESH every second and keeps the existing interface
-  on failure. After a Hub restart, the authenticated `RE_REGISTER` reply skips
-  additional timeout retries; full registration reuses the persisted identity
+- A resident Spoke sends REFRESH at its adaptive cadence and keeps the existing
+  interface on failure. After a Hub restart, the authenticated `RE_REGISTER`
+  reply immediately starts full registration, which reuses the persisted identity
   and session. Changes to the assigned address, node, prefix, or Hub data port
   can cause the interface to be recreated.
 - With `once=true`, the daemon exits after the first attempt: success leaves the
@@ -241,8 +243,9 @@ determine whether Raw enters its active window.
   built from the same source revision; protocol changes require coordinated deployment.
 - Hub state is a versioned local binary structure and is not portable across
   every ABI or architecture.
-- There is no explicit deregistration message. Registration lease expiry
-  performs stale cleanup, and other Spokes learn it through periodic SYNC.
+- There is no explicit deregistration message. Multiple independent probe
+  failures beyond the dynamic threshold trigger stale cleanup, and other Spokes
+  learn it through periodic SYNC.
 - `dtunctl peer-list` dumps peer snapshots; reserved `STATS_GET` remains
   unimplemented.
 - The tunnel has no congestion control, PMTU discovery, fragmentation strategy,

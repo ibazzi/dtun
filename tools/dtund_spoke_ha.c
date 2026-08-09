@@ -1,9 +1,8 @@
 #include "dtund_spoke_ha.h"
-#include "dtun_ha_defaults.h"
 #include "dtun_ha_state.h"
 #include <string.h>
 
-#define SPOKE_HA_STATE_VERSION 2U
+#define SPOKE_HA_STATE_VERSION 1U
 
 typedef struct {
   char magic[4];
@@ -11,14 +10,13 @@ typedef struct {
   dtund_spoke_ha_t state;
 } spoke_ha_file_t;
 
-void dtund_spoke_ha_init(dtund_spoke_ha_t *s, time_t now) {
+void dtund_spoke_ha_init(dtund_spoke_ha_t *s, uint64_t now_ms) {
   memset(s, 0, sizeof(*s));
-  s->last_leader_seen = now;
-  s->failover_timeout = DTUN_HA_FAILOVER_TIMEOUT;
+  dtun_liveness_init(&s->leader_health, DTUN_LIVENESS_CRITICAL, now_ms);
 }
 
 int dtund_spoke_ha_update(dtund_spoke_ha_t *s, const dtrg_msg_t *m,
-                          time_t now) {
+                          uint64_t now_ms) {
   char new_active[DTRG_HUB_ID_LEN] = {0};
   if (!m || m->kind != DTRG_HUB_LIST || !m->hub_count ||
       m->hub_count > DTRG_MAX_HUBS || m->term < s->term)
@@ -37,21 +35,28 @@ int dtund_spoke_ha_update(dtund_spoke_ha_t *s, const dtrg_msg_t *m,
   s->term = m->term;
   if (new_active[0])
     snprintf(s->active_hub_id, sizeof(s->active_hub_id), "%s", new_active);
-  s->failover_timeout =
-      m->failover_timeout ? m->failover_timeout : DTUN_HA_FAILOVER_TIMEOUT;
-  s->last_leader_seen = now;
+  if (s->leader_health.state == DTUN_LIVENESS_UNKNOWN)
+    dtun_liveness_note_success(&s->leader_health, s->leader_health.srtt_us,
+                               now_ms);
   return 0;
 }
 
-void dtund_spoke_ha_seen(dtund_spoke_ha_t *s, time_t now) {
-  s->last_leader_seen = now;
+void dtund_spoke_ha_seen(dtund_spoke_ha_t *s, uint64_t rtt_us,
+                         uint64_t now_ms) {
+  dtun_liveness_note_success(&s->leader_health, rtt_us, now_ms);
+}
+
+void dtund_spoke_ha_missed(dtund_spoke_ha_t *s, uint64_t now_ms) {
+  dtun_liveness_note_miss(&s->leader_health, now_ms);
+  (void)dtun_liveness_tick(&s->leader_health, now_ms);
 }
 
 int dtund_spoke_ha_failover(dtund_spoke_ha_t *s, struct sockaddr_in *current,
-                            time_t now) {
+                            uint64_t now_ms) {
   dtrg_hub_t *best = NULL;
   if (!s->hub_count ||
-      (!s->force_switch && now - s->last_leader_seen < s->failover_timeout))
+      (!s->force_switch &&
+       dtun_liveness_tick(&s->leader_health, now_ms) != DTUN_LIVENESS_OFFLINE))
     return 0;
   for (uint8_t i = 0; i < s->hub_count; i++) {
     dtrg_hub_t *h = &s->hubs[i];
@@ -69,12 +74,13 @@ int dtund_spoke_ha_failover(dtund_spoke_ha_t *s, struct sockaddr_in *current,
     return 0;
   current->sin_addr = best->address;
   current->sin_port = htons(best->control_port);
-  s->last_leader_seen = now;
   s->force_switch = 0;
+  dtun_liveness_init(&s->leader_health, DTUN_LIVENESS_CRITICAL, now_ms);
   return 1;
 }
 
-int dtund_spoke_ha_load(dtund_spoke_ha_t *s, const char *path, time_t now) {
+int dtund_spoke_ha_load(dtund_spoke_ha_t *s, const char *path,
+                        uint64_t now_ms) {
   spoke_ha_file_t file;
   FILE *fp = fopen(path, "rb");
   if (!fp)
@@ -87,7 +93,7 @@ int dtund_spoke_ha_load(dtund_spoke_ha_t *s, const char *path, time_t now) {
   if (!ok)
     return -1;
   *s = file.state;
-  s->last_leader_seen = now;
+  dtun_liveness_init(&s->leader_health, DTUN_LIVENESS_CRITICAL, now_ms);
   return 0;
 }
 

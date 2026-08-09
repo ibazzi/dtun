@@ -16,8 +16,8 @@ enum {
   IFLA_DTUN_NODE_ID,
   IFLA_DTUN_HUB,
   IFLA_DTUN_HUB_PORT,
-  IFLA_DTUN_PROBE_INTERVAL_MS,
-  IFLA_DTUN_PATH_TIMEOUT_MS,
+  IFLA_DTUN_PROBE_INTERVAL_MS_RESERVED,
+  IFLA_DTUN_PATH_TIMEOUT_MS_RESERVED,
   __IFLA_DTUN_MAX,
 };
 #define IFLA_DTUN_MAX (__IFLA_DTUN_MAX - 1)
@@ -25,7 +25,7 @@ enum {
 static void explain(void) {
   fprintf(stderr,
           "Usage: ... type dtun local ADDR udp_port PORT node_id ID [hub ADDR "
-          "hub_port PORT] [probe_interval_ms MS path_timeout_ms MS]\n");
+          "hub_port PORT]\n");
 }
 
 static int parse_ipv4(__u32 *addr, const char *text) {
@@ -37,7 +37,6 @@ static int dtun_parse_opt(struct link_util *lu, int argc, char **argv,
   __u32 addr;
   __u16 port;
   __u64 node;
-  __u32 milliseconds;
   int seen = 0;
 
   while (argc > 0) {
@@ -71,18 +70,6 @@ static int dtun_parse_opt(struct link_util *lu, int argc, char **argv,
         invarg("invalid hub UDP port", *argv);
       port = htons(port);
       addattr_l(n, 1024, IFLA_DTUN_HUB_PORT, &port, sizeof(port));
-    } else if (matches(*argv, "probe_interval_ms") == 0) {
-      NEXT_ARG();
-      if (get_u32(&milliseconds, *argv, 0))
-        invarg("invalid probe interval", *argv);
-      addattr_l(n, 1024, IFLA_DTUN_PROBE_INTERVAL_MS, &milliseconds,
-                sizeof(milliseconds));
-    } else if (matches(*argv, "path_timeout_ms") == 0) {
-      NEXT_ARG();
-      if (get_u32(&milliseconds, *argv, 0))
-        invarg("invalid path timeout", *argv);
-      addattr_l(n, 1024, IFLA_DTUN_PATH_TIMEOUT_MS, &milliseconds,
-                sizeof(milliseconds));
     } else {
       explain();
       return -1;

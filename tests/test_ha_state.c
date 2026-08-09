@@ -1,6 +1,7 @@
 #include "dtun_ha_state.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +55,7 @@ int main(void) {
   CHECK(dtun_ha_invite_decode(token, &decoded, decoded_secret, cluster,
                               &decoded_addr, &port, leader_key) == 0);
   CHECK(!strcmp(decoded.hub_id, "hub-backup-1") && decoded.weight == 900 &&
-        port == 49001);
+        port == 49001 && !strncmp(token, "dtun-ha1:", 9));
   CHECK(decoded_addr.s_addr == addr.s_addr &&
         !memcmp(secret, decoded_secret, 32) &&
         !memcmp(cluster, state.cluster_id, 16));
@@ -62,6 +63,16 @@ int main(void) {
   CHECK(dtun_ha_invite_decode(token, &decoded, decoded_secret, cluster,
                               &decoded_addr, &port, leader_key) < 0);
   free(token);
+  {
+    FILE *legacy = fopen(state_path, "wb");
+    uint32_t version = DTUN_HA_STATE_VERSION - 1;
+
+    CHECK(legacy != NULL);
+    CHECK(fwrite("DTHS", 4, 1, legacy) == 1);
+    CHECK(fwrite(&version, sizeof(version), 1, legacy) == 1);
+    CHECK(fclose(legacy) == 0);
+    CHECK(dtun_ha_state_load(state_path, &loaded) == -EPROTONOSUPPORT);
+  }
   unlink(state_path);
   unlink(key);
   rmdir(dir);

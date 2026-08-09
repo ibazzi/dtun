@@ -37,6 +37,18 @@ typedef struct {
   int raw_up;
   int udp_up;
   int selected_path;
+  uint8_t raw_health;
+  uint8_t udp_health;
+  uint64_t raw_srtt_us;
+  uint64_t udp_srtt_us;
+  uint64_t raw_rttvar_us;
+  uint64_t udp_rttvar_us;
+  uint32_t raw_loss_ppm;
+  uint32_t udp_loss_ppm;
+  uint32_t raw_threshold_ms;
+  uint32_t udp_threshold_ms;
+  uint32_t raw_last_ack_ms;
+  uint32_t udp_last_ack_ms;
 } dtun_nl_peer_status_t;
 
 /* Initialize Netlink connection. Resolves Generic Netlink DTUN family ID. */
@@ -49,8 +61,7 @@ uint32_t dtun_link_get_ifindex(const char *ifname);
 /* Create dtun interface via RTNL. Returns ifindex or < 0 on error. */
 int dtun_link_create(const char *ifname, struct in_addr local_addr,
                      uint16_t udp_port, uint64_t node_id,
-                     struct in_addr hub_addr, uint16_t hub_port,
-                     uint32_t probe_interval_ms, uint32_t path_timeout_ms);
+                     struct in_addr hub_addr, uint16_t hub_port);
 
 /* Delete dtun interface via RTNL RTM_DELLINK. */
 int dtun_link_delete_by_name(const char *ifname);
@@ -70,6 +81,9 @@ int dtun_nl_peer_list(uint32_t ifindex, dtun_nl_peer_status_t **statuses,
 int dtun_nl_rebind(uint32_t ifindex);
 int dtun_nl_hub_set(uint32_t ifindex, struct in_addr hub_addr,
                     uint16_t hub_port);
+int dtun_nl_hub_migrate(uint32_t ifindex, struct in_addr hub_addr,
+                        uint16_t hub_port, uint64_t term);
+int dtun_nl_role_set(uint32_t ifindex, int operational);
 
 /* Kernel module management functions */
 int dtun_module_ensure_loaded(void);

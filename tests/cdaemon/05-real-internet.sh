@@ -39,7 +39,6 @@ psk = $KEY
 hub_address = $HUB_PUB
 hub_port = 49001
 local_port = 0
-interval = 5
 timeout = 4
 once = 0
 EOF

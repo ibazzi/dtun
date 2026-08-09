@@ -105,6 +105,48 @@ out:
   return result;
 }
 
+static int obsolete_liveness_keys_test(void) {
+  dtun_config_t config;
+  char path[] = "/tmp/dtun-obsolete-config-test-XXXXXX";
+  FILE *file = NULL;
+  int fd = -1;
+  int result = -1;
+
+  memset(&config, 0, sizeof(config));
+  fd = mkstemp(path);
+  if (fd < 0)
+    goto out;
+  file = fdopen(fd, "w");
+  if (!file)
+    goto out;
+  fd = -1;
+  if (fputs("[global]\nmode = spoke\nprobe_interval_ms = 1000\n"
+            "path_timeout_ms = 3000\n[spoke]\nhub_address = 192.0.2.1\n",
+            file) == EOF) {
+    fclose(file);
+    file = NULL;
+    goto out;
+  }
+  if (fclose(file) != 0) {
+    file = NULL;
+    goto out;
+  }
+  file = NULL;
+  if (dtun_config_load(&config, path) < 0 || !config.mode ||
+      strcmp(config.mode, "spoke") || !config.hub_address ||
+      strcmp(config.hub_address, "192.0.2.1") || config.ha_enabled)
+    goto out;
+  result = 0;
+out:
+  if (file)
+    fclose(file);
+  if (fd >= 0)
+    close(fd);
+  unlink(path);
+  dtun_config_free(&config);
+  return result;
+}
+
 static int ha_existing_allocation_test(void) {
   dtun_config_t config;
   struct in_addr hub, requested;
@@ -151,7 +193,7 @@ static int standby_step_failover_test(void) {
   char dir[] = "/tmp/dtun-standby-test-XXXXXX";
   char key_path[256], state_path[256], hub_state_path[256];
   uint8_t public_key[32];
-  time_t last_seen;
+  dtun_liveness_t leader_health;
   int result = -1;
 
   if (!mkdtemp(dir))
@@ -171,7 +213,6 @@ static int standby_step_failover_test(void) {
   config.ha_identity_key = strdup(key_path);
   config.state_file = strdup(hub_state_path);
   config.ha_bootstrap_address = strdup("192.0.2.1");
-  config.failover_timeout = 3;
 
   memset(&state, 0, sizeof(state));
   dtun_ha_random_id(state.cluster_id, 16);
@@ -199,14 +240,18 @@ static int standby_step_failover_test(void) {
   if (dtun_ha_state_save(state_path, &state) < 0)
     goto out;
 
-  /* Set last_seen to 5 seconds ago (exceeding failover_timeout = 3) */
-  last_seen = time(NULL) - 5;
-  int step = dtund_ha_standby_step(&config, &last_seen);
+  dtun_liveness_init(&leader_health, DTUN_LIVENESS_CRITICAL,
+                     dtun_monotonic_ms() - 1000);
+  while (leader_health.failed_rounds <
+         dtun_liveness_miss_budget(&leader_health))
+    dtun_liveness_note_miss(&leader_health, dtun_monotonic_ms());
+  leader_health.next_probe_ms = 0;
+  int step = dtund_ha_standby_step(&config, &leader_health, NULL);
   if (step != 1)
     goto out;
 
   if (dtun_ha_state_load(state_path, &loaded) < 0 ||
-      strcmp(loaded.leader_id, "hub-primary") != 0)
+      strcmp(loaded.leader_id, "hub-primary") != 0 || loaded.term != 2)
     goto out;
 
   result = 0;
@@ -215,6 +260,77 @@ out:
   unlink(hub_state_path);
   unlink(key_path);
   rmdir(dir);
+  dtun_config_free(&config);
+  return result;
+}
+
+static int ha_hub_list_mode_test(void) {
+  dtun_config_t config;
+  dtun_ha_state_t state;
+  dtrg_msg_t message;
+  char path[] = "/tmp/dtun-ha-list-test-XXXXXX";
+  uint8_t key[32] = {0}, packet[DTRG_MAX_PACKET];
+  int fd = -1;
+  int result = -1;
+  ssize_t length;
+
+  fd = mkstemp(path);
+  if (fd < 0)
+    return -1;
+  close(fd);
+  fd = -1;
+  dtun_config_init(&config);
+  config.ha_enabled = 1;
+  free(config.ha_state_file);
+  config.ha_state_file = strdup(path);
+  memset(&state, 0, sizeof(state));
+  strcpy(state.local_hub_id, "hub-primary");
+  strcpy(state.leader_id, "hub-primary");
+  state.term = 3;
+  state.member_count = 2;
+  for (uint32_t i = 0; i < state.member_count; i++) {
+    dtun_ha_member_t *member = &state.members[i];
+
+    snprintf(member->hub_id, sizeof(member->hub_id), "hub-%u", i);
+    member->address.s_addr = htonl(0xc0000201U + i);
+    member->control_port = 49001;
+    member->data_port = 49000;
+    member->weight = (uint16_t)(1000 - i * 100);
+    member->role = DTUN_HA_VOTER;
+    member->enabled = 1;
+  }
+  strcpy(state.members[0].hub_id, "hub-primary");
+  if (dtun_ha_state_save(path, &state) < 0)
+    goto out;
+  length = dtund_ha_pack_hub_list(&config, key, 2, packet, sizeof(packet));
+  memset(&message, 0, sizeof(message));
+  if (length < 0 || dtrg_parse(key, packet, (size_t)length, &message) < 0 ||
+      message.ha_mode != DTRG_HA_MODE_DIRECT_PAIR) {
+    dtrg_msg_free(&message);
+    goto out;
+  }
+  dtrg_msg_free(&message);
+  state.member_count = 3;
+  strcpy(state.members[2].hub_id, "hub-2");
+  state.members[2].address.s_addr = htonl(0xc0000203U);
+  state.members[2].control_port = 49001;
+  state.members[2].data_port = 49000;
+  state.members[2].weight = 800;
+  state.members[2].role = DTUN_HA_VOTER;
+  state.members[2].enabled = 1;
+  if (dtun_ha_state_save(path, &state) < 0)
+    goto out;
+  length = dtund_ha_pack_hub_list(&config, key, 2, packet, sizeof(packet));
+  memset(&message, 0, sizeof(message));
+  if (length < 0 || dtrg_parse(key, packet, (size_t)length, &message) < 0 ||
+      message.ha_mode != DTRG_HA_MODE_QUORUM) {
+    dtrg_msg_free(&message);
+    goto out;
+  }
+  dtrg_msg_free(&message);
+  result = 0;
+out:
+  unlink(path);
   dtun_config_free(&config);
   return result;
 }
@@ -235,11 +351,10 @@ int main(void) {
   dtun_config_init(&config);
   STATE_CHECK(config_syslog_test() == 0);
   STATE_CHECK(config_pool_default_test() == 0);
+  STATE_CHECK(obsolete_liveness_keys_test() == 0);
   STATE_CHECK(standby_step_failover_test() == 0);
-  STATE_CHECK(config.peer_timeout == 60);
+  STATE_CHECK(ha_hub_list_mode_test() == 0);
   STATE_CHECK(config.identity_retention == 86400);
-  STATE_CHECK(config.probe_interval_ms == 1000);
-  STATE_CHECK(config.path_timeout_ms == 3000);
   STATE_CHECK(inet_pton(AF_INET, "10.99.0.1", &hub) == 1);
   STATE_CHECK(inet_pton(AF_INET, "10.99.0.2", &requested) == 1);
   hub_state_init();
@@ -330,10 +445,10 @@ int main(void) {
                            g_hub_state.candidate_epoch, 0, page, &flags, &next);
     STATE_CHECK(count == 0);
   }
-  g_hub_state.nodes[0].last_seen = 100;
-  STATE_CHECK(!hub_node_expired(&g_hub_state.nodes[0], 160, 60));
-  STATE_CHECK(hub_node_expired(&g_hub_state.nodes[0], 161, 60));
-  STATE_CHECK(hub_node_expired(&g_hub_state.nodes[1], 100, 60));
+  dtun_liveness_init(&g_hub_node_health[0].liveness, DTUN_LIVENESS_DIRECT,
+                     1000);
+  dtun_liveness_note_success(&g_hub_node_health[0].liveness, 100000, 1000);
+  STATE_CHECK(dtun_liveness_offline_ms(&g_hub_node_health[0].liveness) >= 900);
   hub_remove_node_at(1);
   STATE_CHECK(g_hub_state.node_count == 1 && g_hub_state.session_count == 0 &&
               g_hub_state.nodes[0].node_id == 2);

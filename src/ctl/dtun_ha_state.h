@@ -14,7 +14,7 @@
 #define DTUN_HA_CLUSTER_ID_LEN 16
 #define DTUN_HA_PUBLIC_KEY_LEN 32
 #define DTUN_HA_SECRET_LEN 32
-#define DTUN_HA_STATE_VERSION 3U
+#define DTUN_HA_STATE_VERSION 1U
 
 enum dtun_ha_role { DTUN_HA_LEARNER = 0, DTUN_HA_VOTER = 1 };
 
@@ -56,6 +56,7 @@ typedef struct {
   char voted_for[DTUN_HA_ID_LEN];
   uint8_t failback_requested;
   uint8_t failback_force;
+  uint8_t committed_hub_digest[32];
   dtun_ha_member_t members[DTUN_HA_MAX_MEMBERS];
   dtun_ha_invite_t invites[DTUN_HA_MAX_INVITES];
 } dtun_ha_state_t;

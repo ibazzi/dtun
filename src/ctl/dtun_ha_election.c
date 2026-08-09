@@ -1,4 +1,6 @@
 #include "dtun_ha_election.h"
+#include "dtun_ha_replication.h"
+#include "dtun_liveness.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -15,6 +17,8 @@
 #define VOTE_MAGIC "DTVQ"
 #define VOTE_REPLY_MAGIC "DTVR"
 #define LEADER_MAGIC "DTHL"
+#define ELECTION_LEADER_GRACE_MS 800U
+#define ELECTION_PRIORITY_GRACE_MS 1400U
 
 typedef struct __attribute__((packed)) {
   char magic[4];
@@ -80,6 +84,20 @@ static int connect_timeout(int fd, const struct sockaddr *address,
   }
   return fcntl(fd, F_SETFL, flags);
 }
+
+static int set_io_timeout(int fd, int timeout_ms) {
+  struct timeval timeout = {
+      .tv_sec = timeout_ms / 1000,
+      .tv_usec = (timeout_ms % 1000) * 1000,
+  };
+
+  return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) <
+                     0 ||
+                 setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                            sizeof(timeout)) < 0
+             ? -1
+             : 0;
+}
 static EVP_PKEY *load_private(const char *p) {
   FILE *f = fopen(p, "r");
   EVP_PKEY *k = f ? PEM_read_PrivateKey(f, NULL, NULL, NULL) : NULL;
@@ -108,17 +126,29 @@ static int verify_data(const uint8_t p[32], const void *d, size_t n,
   return ok ? 0 : -1;
 }
 
+static int member_precedes(const dtun_ha_member_t *left,
+                           const dtun_ha_member_t *right) {
+  return left->weight > right->weight ||
+         (left->weight == right->weight &&
+          strcmp(left->hub_id, right->hub_id) < 0);
+}
+
 int dtun_ha_vote_server(int fd, dtun_ha_state_t *state, const char *state_path,
                         const char *identity) {
   vote_request_t q;
   vote_reply_t r;
-  dtun_ha_member_t *candidate;
+  dtun_ha_member_t *candidate, *local;
+  uint64_t last_contact;
+  uint64_t contact_age;
   uint64_t term;
   if (io_all(fd, &q, sizeof(q), 0) < 0 || memcmp(q.magic, VOTE_MAGIC, 4))
     return -1;
   candidate = dtun_ha_member_find(state, q.candidate_id);
+  local = dtun_ha_member_find(state, state->local_hub_id);
   term = be64toh(q.term);
-  if (!candidate || !candidate->enabled || candidate->role != DTUN_HA_VOTER ||
+  if (!candidate || !local || !candidate->enabled ||
+      candidate->role != DTUN_HA_VOTER ||
+      ntohs(q.weight) != candidate->weight ||
       verify_data(candidate->public_key, &q,
                   offsetof(vote_request_t, signature), q.signature) < 0)
     return -1;
@@ -127,7 +157,13 @@ int dtun_ha_vote_server(int fd, dtun_ha_state_t *state, const char *state_path,
   snprintf(r.voter_id, sizeof(r.voter_id), "%s", state->local_hub_id);
   r.term = htobe64(state->term);
   memcpy(r.nonce, q.nonce, 16);
+  last_contact = dtun_ha_last_leader_contact_ms();
+  contact_age = last_contact ? dtun_monotonic_ms() - last_contact : UINT64_MAX;
   if (term >= state->term && be64toh(q.commit_index) >= state->commit_index &&
+      (!strcmp(state->leader_id, q.candidate_id) || !last_contact ||
+       contact_age >= ELECTION_LEADER_GRACE_MS) &&
+      (!member_precedes(local, candidate) ||
+       contact_age >= ELECTION_PRIORITY_GRACE_MS) &&
       (state->voted_term < term ||
        (state->voted_term == term &&
         !strcmp(state->voted_for, q.candidate_id)))) {
@@ -177,8 +213,9 @@ int dtun_ha_request_vote(struct in_addr address, uint16_t port,
   dst.sin_addr = address;
   dst.sin_port = htons(port);
   if (fd >= 0 &&
-      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 2000) == 0 &&
-      io_all(fd, &q, sizeof(q), 1) == 0 && io_all(fd, &r, sizeof(r), 0) == 0 &&
+      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 400) == 0 &&
+      set_io_timeout(fd, 400) == 0 && io_all(fd, &q, sizeof(q), 1) == 0 &&
+      io_all(fd, &r, sizeof(r), 0) == 0 &&
       !memcmp(r.magic, VOTE_REPLY_MAGIC, 4) && !memcmp(r.nonce, q.nonce, 16) &&
       verify_data(peer->public_key, &r, offsetof(vote_reply_t, signature),
                   r.signature) == 0 &&
@@ -231,8 +268,8 @@ int dtun_ha_announce_leader(struct in_addr address, uint16_t port,
   dst.sin_addr = address;
   dst.sin_port = htons(port);
   if (fd >= 0 &&
-      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 2000) == 0 &&
-      io_all(fd, &a, sizeof(a), 1) == 0)
+      connect_timeout(fd, (struct sockaddr *)&dst, sizeof(dst), 400) == 0 &&
+      set_io_timeout(fd, 400) == 0 && io_all(fd, &a, sizeof(a), 1) == 0)
     result = 0;
   if (fd >= 0)
     close(fd);

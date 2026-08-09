@@ -23,6 +23,13 @@ static const char *path_name(int path) {
   }
 }
 
+static const char *health_name(int health) {
+  static const char *const names[] = {"unknown", "healthy", "suspect",
+                                      "offline"};
+
+  return health >= 0 && health < 4 ? names[health] : "invalid";
+}
+
 static const char *error_name(int code) {
   switch (-code) {
   case EEXIST:
@@ -148,8 +155,19 @@ static void print_peer_json(const dtun_nl_peer_status_t *s) {
   print_json_string_or_null(strcmp(rendezvous, "-") ? rendezvous : NULL);
   printf(",\"direct_udp\":");
   print_json_string_or_null(strcmp(direct, "-") ? direct : NULL);
-  printf(",\"udp_up\":%s,\"selected_path\":\"%s\"}",
-         s->udp_up ? "true" : "false", path_name(s->selected_path));
+  printf(",\"udp_up\":%s,\"selected_path\":\"%s\","
+         "\"raw_health\":{\"state\":\"%s\",\"srtt_us\":%llu,"
+         "\"rttvar_us\":%llu,\"loss_ppm\":%u,\"threshold_ms\":%u,"
+         "\"last_ack_ms\":%u},\"udp_health\":{\"state\":\"%s\","
+         "\"srtt_us\":%llu,\"rttvar_us\":%llu,\"loss_ppm\":%u,"
+         "\"threshold_ms\":%u,\"last_ack_ms\":%u}}",
+         s->udp_up ? "true" : "false", path_name(s->selected_path),
+         health_name(s->raw_health), (unsigned long long)s->raw_srtt_us,
+         (unsigned long long)s->raw_rttvar_us, s->raw_loss_ppm,
+         s->raw_threshold_ms, s->raw_last_ack_ms, health_name(s->udp_health),
+         (unsigned long long)s->udp_srtt_us,
+         (unsigned long long)s->udp_rttvar_us, s->udp_loss_ppm,
+         s->udp_threshold_ms, s->udp_last_ack_ms);
 }
 
 static void print_peer_human(const dtun_nl_peer_status_t *s) {
@@ -172,6 +190,16 @@ static void print_peer_human(const dtun_nl_peer_status_t *s) {
   printf("Direct UDP:           %s\n", direct);
   printf("Rendezvous UDP:       %s\n", rendezvous);
   printf("UDP state:            %s\n", s->udp_up ? "up" : "down");
+  printf("Raw health:           %s srtt=%lluus var=%lluus loss=%uppm "
+         "threshold=%ums age=%ums\n",
+         health_name(s->raw_health), (unsigned long long)s->raw_srtt_us,
+         (unsigned long long)s->raw_rttvar_us, s->raw_loss_ppm,
+         s->raw_threshold_ms, s->raw_last_ack_ms);
+  printf("UDP health:           %s srtt=%lluus var=%lluus loss=%uppm "
+         "threshold=%ums age=%ums\n",
+         health_name(s->udp_health), (unsigned long long)s->udp_srtt_us,
+         (unsigned long long)s->udp_rttvar_us, s->udp_loss_ppm,
+         s->udp_threshold_ms, s->udp_last_ack_ms);
 }
 
 static int compare_peer(const void *left, const void *right) {

@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DTRG_MAGIC "DTRG"
+#define DTRG_MAGIC "DTG2"
 #define DTRG_INIT 1
 #define DTRG_CHALLENGE 2
 #define DTRG_CONFIRM 3
@@ -14,10 +14,12 @@
 #define DTRG_REFRESH 6
 #define DTRG_REFRESH_ACK 7
 #define DTRG_HUB_LIST 8
+#define DTRG_NOT_LEADER 9
 
 #define DTRG_REFRESH_SNAPSHOT 0x01
 #define DTRG_REFRESH_MORE 0x02
 #define DTRG_REFRESH_RE_REGISTER 0x04
+#define DTRG_REFRESH_HUB_SWITCH 0x08
 #define DTRG_PEER_ONLINE 0x01
 #define DTRG_PEER_TOMBSTONE 0x02
 
@@ -80,7 +82,7 @@ typedef struct {
   uint8_t cluster_id[16];
   uint64_t term;
   uint8_t ha_mode;
-  uint16_t failover_timeout;
+  char leader_id[DTRG_HUB_ID_LEN];
   dtrg_hub_t *hubs;
   uint8_t hub_count;
 } dtrg_msg_t;
@@ -110,7 +112,8 @@ ssize_t dtrg_pack_ack(const uint8_t *key, uint64_t node_id, uint32_t tunnel_id,
                       uint32_t remote_tunnel_id, struct in_addr address,
                       uint8_t prefix_len, uint16_t data_port,
                       const uint8_t *nonce, const uint8_t *lease_token,
-                      uint64_t epoch, uint8_t *out, size_t max_len);
+                      uint64_t epoch, uint64_t term, const char *leader_id,
+                      uint8_t *out, size_t max_len);
 
 ssize_t dtrg_pack_sync(const uint8_t *key, uint64_t node_id,
                        const uint8_t *nonce, const dtrg_sync_peer_t *peers,
@@ -121,20 +124,23 @@ ssize_t dtrg_pack_refresh(const uint8_t *key, uint64_t node_id,
                           uint64_t epoch, uint16_t offset, uint8_t *out,
                           size_t max_len);
 
-ssize_t dtrg_pack_refresh_ack(const uint8_t *key, uint64_t node_id,
-                              const uint8_t *lease_token, uint64_t counter,
-                              uint64_t epoch, struct in_addr observed_addr,
-                              uint16_t observed_port, uint8_t flags,
-                              uint16_t next_offset,
-                              const dtrg_sync_peer_t *peers,
-                              uint16_t peer_count, uint8_t *out,
-                              size_t max_len);
+ssize_t dtrg_pack_refresh_ack(
+    const uint8_t *key, uint64_t node_id, const uint8_t *lease_token,
+    uint64_t counter, uint64_t epoch, struct in_addr observed_addr,
+    uint16_t observed_port, uint8_t flags, uint16_t next_offset, uint64_t term,
+    const char *leader_id, uint16_t data_port, const dtrg_sync_peer_t *peers,
+    uint16_t peer_count, uint8_t *out, size_t max_len);
 
 ssize_t dtrg_pack_hub_list(const uint8_t *key, uint64_t node_id,
                            const uint8_t cluster_id[16], uint64_t term,
-                           uint8_t ha_mode, uint16_t failover_timeout,
-                           const dtrg_hub_t *hubs, uint8_t hub_count,
-                           uint8_t *out, size_t max_len);
+                           uint8_t ha_mode, const dtrg_hub_t *hubs,
+                           uint8_t hub_count, uint8_t *out, size_t max_len);
+
+ssize_t dtrg_pack_not_leader(const uint8_t *key, uint64_t node_id,
+                             uint64_t term, const char *leader_id,
+                             struct in_addr leader_address,
+                             uint16_t control_port, uint16_t data_port,
+                             uint8_t *out, size_t max_len);
 
 /* Parse and authenticate an incoming packet. Returns 0 on success. */
 int dtrg_parse(const uint8_t *key, const uint8_t *pkt, size_t pkt_len,

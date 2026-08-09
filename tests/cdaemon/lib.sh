@@ -95,8 +95,8 @@ state_file = $OUT/hub.state
 EOF
 }
 
-spoke_conf() { # ns outer inner node [once] [interval]
-	ns=$1; outer=$2; inner=$3; node=$4; once=${5:-0}; interval=${6:-5}
+spoke_conf() { # ns outer inner node [once]
+	ns=$1; outer=$2; inner=$3; node=$4; once=${5:-0}
 	cat > "$OUT/spoke-$ns.conf" <<EOF
 [global]
 mode = spoke
@@ -111,7 +111,6 @@ psk = $KEY
 hub_address = $HUB_O
 hub_port = 49001
 local_port = 0
-interval = $interval
 timeout = 3
 once = $once
 EOF

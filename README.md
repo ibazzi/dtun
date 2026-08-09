@@ -1,8 +1,8 @@
 # dtun
 
 dtun 支持可选的多 Hub 高可用模式：备 Hub通过一次性 Invite ID在线加入，一主一备
-可直接接管，三个及以上 Hub使用加权多数派选主。Spoke会动态学习 Hub列表并在活动
-Hub长期离线后切换。部署步骤见 [docs/guide.md](docs/guide.md)。
+使用 direct-pair 自适应快速接管，三个及以上 Hub使用加权多数派选主。Spoke会动态
+学习 Hub列表并在活动 Hub离线后切换。部署步骤见 [docs/guide.md](docs/guide.md)。
 
 [English](README.en.md) | **简体中文**
 
@@ -20,7 +20,7 @@ Raw IPv4 协议 253，也可以承载于 UDP；两种承载使用同一套会话
 - Raw IP 为首选路径；Raw 不可用时使用已配置的 UDP 端点。
 - 有效 UDP 帧通过 HMAC 后可以更新 NAT 映射得到的来源 `IP:port`。
 - DTRG 控制面支持轻量 REFRESH、候选代次、分页同步、Hub 状态持久化和 spoke 间 `/32` 直连同步。
-- 默认每秒探测、3 秒路径超时；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
+- 探测周期与离线阈值由 EWMA/RTTVAR 自适应计算；认证 UDP 来源变化会更新 NAT 候选并重新验证 Raw。
 - `dtunctl peer-list --ifindex N` 可列出全部 peer；peer 命令支持 `--format json`。
 - C `dtund` 和 `dtunctl` 是唯一正式控制面；Python 仅用于测试造包。
 - Raw 和 UDP 外层发送均进入 IPv4 local-output/netfilter 路径。

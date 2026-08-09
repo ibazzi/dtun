@@ -96,9 +96,6 @@ name; the section assignments below are conventions for supported configs.
 | `interface` | `dtun0` | Interface created and managed by the daemon |
 | `local_outer_ip` | `0.0.0.0` | Local outer IPv4; zero selects the source from each outer route |
 | `data_port` | `49000` | Local data-plane UDP port |
-| `probe_interval_ms` | `1000` | Raw/UDP path probe interval |
-| `path_timeout_ms` | `3000` | Path liveness timeout; at least twice the probe interval |
-| `fast_recovery` | `true` | Enable endpoint-change recovery; Spokes must use a wildcard outer address |
 | `node_id` | `0` | A Hub must use 1 (0 falls back to 1); on a Spoke, 0 requests temporary allocation and 1 is reserved |
 | `address` | `0.0.0.0/24` | Inner IPv4/CIDR; a zero Spoke address requests pool allocation |
 | `psk` | none | 64-hex-digit representation of a 32-byte PSK; omission is insecure test mode |
@@ -115,7 +112,6 @@ name; the section assignments below are conventions for supported configs.
 | `pool` | Derived from the Hub `address` network prefix | Spoke inner-address pool; `/0` through `/30` are accepted, and an explicit `pool` takes precedence |
 | `state_file` | `/var/lib/dtun/hub.state` | Versioned binary persistent state |
 | `cookie_seconds` | `30` | Cookie time-bucket duration; nonpositive values fall back to 30 |
-| `peer_timeout` | `60` | Seconds to retain a Spoke after its last successful registration; nonpositive values fall back to 60 |
 | `identity_retention` | `86400` | Seconds to retain offline address and tunnel/session allocations |
 
 ### `[spoke]`
@@ -125,8 +121,6 @@ name; the section assignments below are conventions for supported configs.
 | `hub_address` | none | Required Hub control-plane IPv4 address |
 | `hub_port` | `49001` | Hub control port, not the data port |
 | `local_port` | `0` | Local registration-control source port; 0 selects an ephemeral port |
-| `interval` | `20` | Delay after each registration attempt; nonpositive values act as 1 second |
-| `refresh_interval_ms` | `1000` | DTRG lightweight refresh interval after registration |
 | `timeout` | `5` | Receive timeout for each control response; nonpositive values fall back to 5 |
 | `once` | `false` | Exit after the first attempt; keep the link on success, return nonzero on failure |
 
@@ -197,7 +191,6 @@ psk = REPLACE_WITH_64_HEX_CHARACTERS
 hub_address = 192.0.2.1
 hub_port = 49001
 local_port = 0
-interval = 20
 timeout = 5
 once = false
 ```
@@ -237,6 +230,29 @@ must be preserved.
 the daemon exits after the first successful registration and leaves the link in
 place; the first failure exits nonzero without retaining a link.
 
+## 6.1 Hub high availability
+
+The minimum HA deployment is one primary and one backup. In this direct-pair
+mode, the backup takes over without a vote after multiple independent
+EWMA/RTTVAR probe rounds declare the primary offline. Three or more enabled
+Hubs use weighted majority election. Direct-pair prioritizes availability, so a
+network partition can briefly leave both Hubs active; authenticated highest-term
+state converges after connectivity returns.
+
+Initialize the primary, create a single-use invite, and join the backup:
+
+```sh
+sudo dtunctl ha init --hub-id hub-primary
+sudo dtunctl ha invite create --hub-id hub-backup-1 \
+  --weight 900 --expires 10m --format plain
+sudo dtunctl ha join --config /etc/dtun/dtun.conf
+```
+
+New address, node-ID, and tunnel/session allocations are acknowledged only
+after replication. During direct-pair isolation, existing identities may
+reconnect and continue forwarding, but brand-new allocations are rejected
+before persistent state is changed.
+
 ## 7. Direct paths, Hub forwarding, and fallback
 
 A Spoke always installs the pool route through its Hub peer. The Hub installs a
@@ -253,19 +269,19 @@ the peer's distinct bidirectional tunnel IDs and `/32`. Entries absent from a
 later valid SYNC are removed, and periodic registration eventually informs old
 nodes about new ones.
 
-The Hub checks registration leases once per second. When a Spoke has not
-completed a valid registration for `peer_timeout` seconds, the Hub removes its
-kernel peer, persistent node, and every related direct session. Other online
-Spokes learn that it disappeared from the SYNC returned by their next periodic
-registration and remove their direct peers. Propagation normally takes no more
-than `peer_timeout + interval`. Configure `peer_timeout` comfortably above the
-Spoke `interval` (at least three times larger is recommended) to tolerate brief
-network disruption.
+Probe cadence, offline thresholds, and accelerated failure probes are computed
+by the adaptive EWMA/RTTVAR state machine. There are no
+`probe_interval_ms`, `path_timeout_ms`, `peer_timeout`, `interval`,
+`refresh_interval_ms`, or `failover_timeout` settings. Legacy keys emit a
+compatibility warning and are ignored. The Hub removes an active kernel path
+only after multiple independent failed probe rounds exceed the dynamic
+threshold; address and tunnel/session identity remain governed by
+`identity_retention`.
 
 The kernel's actual transmit order is:
 
 ```text
-Raw candidate validated within 3 seconds → directly observed authenticated UDP endpoint within 3 seconds → re-encapsulation through the Hub peer
+Raw candidate valid within its adaptive threshold → authenticated UDP endpoint valid within its adaptive threshold → re-encapsulation through the Hub peer
 ```
 
 Hub-supplied rendezvous candidates are probe-only; `udp_up` is set only after a
@@ -304,8 +320,8 @@ sudo ./build/dtunctl peer-list --ifindex "$IFINDEX" --format json
 ```
 
 Peer commands default to human-readable output; automation should explicitly
-select `--format json`. `raw_up` and `udp_up` use the configured path timeout,
-which defaults to three seconds.
+select `--format json`. `raw_up` and `udp_up` reflect each path's adaptive
+EWMA/RTTVAR threshold.
 
 Common issues:
 

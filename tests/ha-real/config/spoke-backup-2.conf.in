@@ -5,10 +5,7 @@ local_outer_ip = 0.0.0.0
 data_port = 49000
 node_id = 4
 address = 10.77.0.4/24
-probe_interval_ms = 500
-path_timeout_ms = 1500
 raw_transport = false
-refresh_interval_ms = 500
 psk = @PSK@
 
 [spoke]

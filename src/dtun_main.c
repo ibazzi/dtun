@@ -5,6 +5,7 @@
 #include <linux/if_arp.h>
 #include <linux/inetdevice.h>
 #include <linux/ip.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/rculist.h>
@@ -30,8 +31,6 @@ static const struct nla_policy dtun_link_policy[IFLA_DTUN_MAX + 1] = {
     [IFLA_DTUN_NODE_ID] = {.type = NLA_U64},
     [IFLA_DTUN_HUB] = {.type = NLA_U32},
     [IFLA_DTUN_HUB_PORT] = {.type = NLA_U16},
-    [IFLA_DTUN_PROBE_INTERVAL_MS] = {.type = NLA_U32},
-    [IFLA_DTUN_PATH_TIMEOUT_MS] = {.type = NLA_U32},
 };
 
 static int dtun_tag(struct dtun_peer *peer, const struct dtun_hdr *hdr,
@@ -45,8 +44,113 @@ static int dtun_send_path(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
                           enum dtun_transport transport, __be32 addr,
                           __be16 port);
 
-static unsigned long dtun_path_timeout(const struct dtun_dev *d) {
-  return msecs_to_jiffies(d->path_timeout_ms);
+static u32 dtun_clamp_ms(u64 value, u32 low, u32 high) {
+  if (value < low)
+    return low;
+  if (value > high)
+    return high;
+  return (u32)value;
+}
+
+static u32 dtun_path_miss_budget(const struct dtun_path_health *health) {
+  return health->loss_q16 < DTUN_LOSS_Q16_TWO_PERCENT ? 3 : 4;
+}
+
+void dtun_path_health_init(struct dtun_path_health *health) {
+  memset(health, 0, sizeof(*health));
+  health->srtt_us = 100000;
+  health->rttvar_us = 50000;
+  health->last_ack = jiffies;
+  health->next_probe = jiffies;
+  health->state = DTUN_HEALTH_UNKNOWN;
+}
+
+u32 dtun_path_probe_interval_ms(const struct dtun_peer *peer,
+                                const struct dtun_path_health *health) {
+  u64 estimate_us = health->srtt_us + 2 * health->rttvar_us;
+
+  if (health->state == DTUN_HEALTH_SUSPECT)
+    return 100;
+  if (peer->node_id != 1)
+    return dtun_clamp_ms(div_u64(2 * estimate_us + 999, 1000), 250, 750);
+  return dtun_clamp_ms(div_u64(estimate_us + 999, 1000), 100, 250);
+}
+
+u32 dtun_path_rto_ms(const struct dtun_peer *peer,
+                     const struct dtun_path_health *health) {
+  u64 variation_us = max_t(u64, 10000, 4 * health->rttvar_us);
+
+  return dtun_clamp_ms(div_u64(health->srtt_us + variation_us + 999, 1000), 100,
+                       peer->node_id == 1 ? 500 : 1000);
+}
+
+u32 dtun_path_offline_ms(const struct dtun_peer *peer,
+                         const struct dtun_path_health *health) {
+  u64 interval = dtun_path_probe_interval_ms(peer, health);
+  u64 deadline = max_t(u64, dtun_path_rto_ms(peer, health),
+                       dtun_path_miss_budget(health) * interval);
+
+  return peer->node_id == 1 ? dtun_clamp_ms(deadline, 600, 900)
+                            : dtun_clamp_ms(deadline, 900, 1800);
+}
+
+u32 dtun_path_loss_ppm(const struct dtun_path_health *health) {
+  return (u32)div_u64(1000000ULL * health->loss_q16, 65536);
+}
+
+void dtun_path_note_ack(struct dtun_peer *peer, struct dtun_path_health *health,
+                        u64 probe_id) {
+  u64 now_ns, rtt_us, old_srtt, error;
+
+  if (!health->pending || probe_id != health->probe_id)
+    return;
+  now_ns = ktime_get_mono_fast_ns();
+  rtt_us = now_ns > health->probe_sent_ns
+               ? div_u64(now_ns - health->probe_sent_ns, 1000)
+               : 1;
+  old_srtt = health->srtt_us;
+  if (!health->initialized) {
+    health->srtt_us = rtt_us;
+    health->rttvar_us = rtt_us / 2;
+    health->initialized = 1;
+  } else {
+    error = rtt_us > old_srtt ? rtt_us - old_srtt : old_srtt - rtt_us;
+    health->rttvar_us = (3 * health->rttvar_us + error) / 4;
+    health->srtt_us = (7 * old_srtt + rtt_us) / 8;
+  }
+  health->loss_q16 = (7 * health->loss_q16) / 8;
+  health->failed_rounds = 0;
+  health->pending = 0;
+  health->duplicate_pending = 0;
+  health->last_ack = jiffies;
+  health->state = DTUN_HEALTH_HEALTHY;
+  health->next_probe =
+      jiffies + msecs_to_jiffies(dtun_path_probe_interval_ms(peer, health));
+}
+
+void dtun_path_tick(struct dtun_peer *peer, struct dtun_path_health *health) {
+  u64 now_ns = ktime_get_mono_fast_ns();
+  u64 pending_ms = health->pending && now_ns > health->probe_sent_ns
+                       ? div_u64(now_ns - health->probe_sent_ns, 1000000)
+                       : 0;
+  unsigned long offline = msecs_to_jiffies(dtun_path_offline_ms(peer, health));
+
+  if (health->pending && pending_ms >= dtun_path_rto_ms(peer, health))
+    health->state = DTUN_HEALTH_SUSPECT;
+  if (time_after_eq(jiffies, health->last_ack + offline) &&
+      health->failed_rounds >= dtun_path_miss_budget(health))
+    health->state = DTUN_HEALTH_OFFLINE;
+}
+
+bool dtun_path_available(const struct dtun_path_health *health) {
+  return health->initialized && health->state != DTUN_HEALTH_OFFLINE;
+}
+
+static void dtun_path_note_probe_miss(struct dtun_path_health *health) {
+  health->loss_q16 = (u32)div_u64(7ULL * health->loss_q16 + 65536ULL, 8);
+  if (health->failed_rounds != U32_MAX)
+    health->failed_rounds++;
+  health->state = DTUN_HEALTH_SUSPECT;
 }
 
 static void dtun_hub_endpoint(struct dtun_dev *d, __be32 *addr, __be16 *port) {
@@ -102,11 +206,13 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
   u64 src_node, dst_node;
   bool endpoint_changed = false;
   bool reply_probe = false;
+  bool has_probe_payload = false;
+  struct dtun_probe_payload probe_payload;
   __be32 hub_addr;
   __be16 hub_port;
   int err;
 
-  if (!pskb_may_pull(skb, sizeof(*hdr)))
+  if (!READ_ONCE(d->operational) || !pskb_may_pull(skb, sizeof(*hdr)))
     goto drop;
   hdr = (struct dtun_hdr *)skb->data;
   if (hdr->version != DTUN_VERSION || hdr->type < DTUN_FRAME_DATA ||
@@ -145,9 +251,16 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
   if (!dtun_replay_ok(peer, be64_to_cpu(hdr->seq))) {
     goto drop_unlock;
   }
+  if ((hdr->type == DTUN_FRAME_PROBE || hdr->type == DTUN_FRAME_KEEPALIVE) &&
+      skb->len == sizeof(*hdr) + sizeof(probe_payload)) {
+    memcpy(&probe_payload, skb->data + sizeof(*hdr), sizeof(probe_payload));
+    has_probe_payload = probe_payload.magic == cpu_to_be32(DTUN_PROBE_MAGIC);
+  }
   if (transport == DTUN_TRANSPORT_RAW) {
     peer->raw_validated_addr = src;
-    peer->raw_seen = jiffies;
+    if (hdr->type == DTUN_FRAME_KEEPALIVE && has_probe_payload)
+      dtun_path_note_ack(peer, &peer->raw_health,
+                         be64_to_cpu(probe_payload.probe_id));
   } else {
     dtun_hub_endpoint(d, &hub_addr, &hub_port);
     if (peer->node_id == 1 || src != hub_addr || port != hub_port) {
@@ -156,23 +269,29 @@ static int dtun_ingress(struct dtun_dev *d, struct sk_buff *skb, __be32 src,
        * configured Hub relay endpoint is kept stable. */
       endpoint_changed =
           peer->direct_udp_addr != src || peer->direct_udp_port != port;
+      if (endpoint_changed)
+        dtun_path_health_init(&peer->udp_health);
       peer->direct_udp_port = port;
       peer->direct_udp_addr = src;
-      peer->udp_seen = jiffies;
       if (peer->dynamic_raw && peer->raw_addr != src) {
         peer->raw_addr = src;
         peer->raw_validated_addr = 0;
-        peer->raw_seen = 0;
+        dtun_path_health_init(&peer->raw_health);
       }
     }
+    if (hdr->type == DTUN_FRAME_KEEPALIVE && has_probe_payload)
+      dtun_path_note_ack(peer, &peer->udp_health,
+                         be64_to_cpu(probe_payload.probe_id));
   }
   reply_probe = hdr->type == DTUN_FRAME_PROBE;
   spin_unlock_bh(&peer->state_lock);
   if (transport == DTUN_TRANSPORT_UDP && endpoint_changed)
     dtun_genl_observed_peer(d, peer, src, port, transport);
   if (reply_probe)
-    (void)dtun_send_path(d, peer, DTUN_FRAME_KEEPALIVE, NULL, 0, transport, src,
-                         port);
+    (void)dtun_send_path(d, peer, DTUN_FRAME_KEEPALIVE,
+                         has_probe_payload ? (const u8 *)&probe_payload : NULL,
+                         has_probe_payload ? sizeof(probe_payload) : 0,
+                         transport, src, port);
   if (hdr->type != DTUN_FRAME_DATA) {
     dtun_peer_put(peer);
     kfree_skb(skb);
@@ -327,19 +446,17 @@ static int dtun_peer_snapshot(struct dtun_dev *d,
   return used;
 }
 
-static enum dtun_transport dtun_choose_path(struct dtun_dev *d,
-                                            struct dtun_peer *peer,
+static enum dtun_transport dtun_choose_path(struct dtun_peer *peer,
                                             __be32 *addr, __be16 *port) {
   spin_lock_bh(&peer->state_lock);
-  if (peer->raw_validated_addr &&
-      time_before(jiffies, peer->raw_seen + dtun_path_timeout(d))) {
+  if (peer->raw_validated_addr && dtun_path_available(&peer->raw_health)) {
     *addr = peer->raw_validated_addr;
     *port = 0;
     spin_unlock_bh(&peer->state_lock);
     return DTUN_TRANSPORT_RAW;
   }
   if (peer->direct_udp_addr && peer->direct_udp_port &&
-      time_before(jiffies, peer->udp_seen + dtun_path_timeout(d))) {
+      dtun_path_available(&peer->udp_health)) {
     *addr = peer->direct_udp_addr;
     *port = peer->direct_udp_port;
     spin_unlock_bh(&peer->state_lock);
@@ -605,7 +722,7 @@ static int dtun_send(struct dtun_dev *d, struct dtun_peer *peer, u8 type,
   __be16 port;
   enum dtun_transport transport;
 
-  transport = dtun_choose_path(d, peer, &addr, &port);
+  transport = dtun_choose_path(peer, &addr, &port);
   return dtun_send_path(d, peer, type, payload, payload_len, transport, addr,
                         port);
 }
@@ -634,6 +751,12 @@ static netdev_tx_t dtun_xmit(struct sk_buff *skb, struct net_device *dev) {
   bool multicast = false;
   u8 *payload;
   int err;
+
+  if (!READ_ONCE(d->operational)) {
+    dev->stats.tx_dropped++;
+    dev_kfree_skb(skb);
+    return NETDEV_TX_OK;
+  }
 
   if (skb->protocol == htons(ETH_P_IP) &&
       pskb_may_pull(skb, sizeof(struct iphdr)))
@@ -752,12 +875,61 @@ err_udp:
   return err;
 }
 
+static void dtun_probe_path(struct dtun_dev *d, struct dtun_peer *peer,
+                            struct dtun_path_health *health,
+                            enum dtun_transport transport, __be32 addr,
+                            __be16 port) {
+  struct dtun_probe_payload payload;
+  bool duplicate_only = false;
+
+  spin_lock_bh(&peer->state_lock);
+  dtun_path_tick(peer, health);
+  if (health->duplicate_pending &&
+      time_after_eq(jiffies, health->duplicate_probe)) {
+    health->duplicate_pending = 0;
+    duplicate_only = true;
+    payload.magic = cpu_to_be32(DTUN_PROBE_MAGIC);
+    payload.probe_id = cpu_to_be64(health->probe_id);
+  }
+  if (duplicate_only) {
+    spin_unlock_bh(&peer->state_lock);
+    (void)dtun_send_path(d, peer, DTUN_FRAME_PROBE, (const u8 *)&payload,
+                         sizeof(payload), transport, addr, port);
+    return;
+  }
+  if (time_before(jiffies, health->next_probe)) {
+    spin_unlock_bh(&peer->state_lock);
+    return;
+  }
+  if (health->pending)
+    dtun_path_note_probe_miss(health);
+  health->probe_id++;
+  if (!health->probe_id)
+    health->probe_id++;
+  health->probe_sent_ns = ktime_get_mono_fast_ns();
+  health->pending = 1;
+  health->duplicate_pending = health->state == DTUN_HEALTH_SUSPECT;
+  if (health->duplicate_pending)
+    health->duplicate_probe = jiffies + msecs_to_jiffies(25);
+  health->next_probe =
+      jiffies + msecs_to_jiffies(dtun_path_probe_interval_ms(peer, health));
+  payload.magic = cpu_to_be32(DTUN_PROBE_MAGIC);
+  payload.probe_id = cpu_to_be64(health->probe_id);
+  spin_unlock_bh(&peer->state_lock);
+
+  (void)dtun_send_path(d, peer, DTUN_FRAME_PROBE, (const u8 *)&payload,
+                       sizeof(payload), transport, addr, port);
+}
+
 static void dtun_probe_work(struct work_struct *work) {
   struct dtun_dev *d =
       container_of(to_delayed_work(work), struct dtun_dev, probe_work);
   struct dtun_peer *peer;
   struct dtun_peer **peers;
   unsigned int count = 0, used = 0, i;
+
+  if (!READ_ONCE(d->operational))
+    goto reschedule;
 
   spin_lock_bh(&d->peer_lock);
   list_for_each_entry(peer, &d->peers, list) count++;
@@ -784,11 +956,11 @@ static void dtun_probe_work(struct work_struct *work) {
     udp_port = peer->direct_udp_addr ? peer->direct_udp_port : peer->udp_port;
     spin_unlock_bh(&peer->state_lock);
     if (raw_addr)
-      dtun_send_path(d, peer, DTUN_FRAME_PROBE, NULL, 0, DTUN_TRANSPORT_RAW,
-                     raw_addr, 0);
+      dtun_probe_path(d, peer, &peer->raw_health, DTUN_TRANSPORT_RAW, raw_addr,
+                      0);
     if (udp_addr && udp_port)
-      dtun_send_path(d, peer, DTUN_FRAME_PROBE, NULL, 0, DTUN_TRANSPORT_UDP,
-                     udp_addr, udp_port);
+      dtun_probe_path(d, peer, &peer->udp_health, DTUN_TRANSPORT_UDP, udp_addr,
+                      udp_port);
     else {
       __be32 hub_addr;
       __be16 hub_port;
@@ -802,7 +974,7 @@ static void dtun_probe_work(struct work_struct *work) {
   kfree(peers);
 
 reschedule:
-  schedule_delayed_work(&d->probe_work, msecs_to_jiffies(d->probe_interval_ms));
+  schedule_delayed_work(&d->probe_work, msecs_to_jiffies(25));
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
@@ -830,16 +1002,8 @@ static int dtun_newlink(struct net *net, struct net_device *dev,
   d->local_addr = nla_get_be32(data[IFLA_DTUN_LOCAL]);
   d->udp_port = nla_get_be16(data[IFLA_DTUN_UDP_PORT]);
   d->node_id = nla_get_u64(data[IFLA_DTUN_NODE_ID]);
+  d->operational = true;
   spin_lock_init(&d->hub_lock);
-  d->probe_interval_ms = data[IFLA_DTUN_PROBE_INTERVAL_MS]
-                             ? nla_get_u32(data[IFLA_DTUN_PROBE_INTERVAL_MS])
-                             : DTUN_PROBE_INTERVAL_MS;
-  d->path_timeout_ms = data[IFLA_DTUN_PATH_TIMEOUT_MS]
-                           ? nla_get_u32(data[IFLA_DTUN_PATH_TIMEOUT_MS])
-                           : DTUN_PATH_TIMEOUT_MS;
-  if (d->probe_interval_ms < 100 || d->path_timeout_ms < 500 ||
-      d->path_timeout_ms < 2 * d->probe_interval_ms)
-    return -EINVAL;
   if (data[IFLA_DTUN_HUB])
     d->hub_addr = nla_get_be32(data[IFLA_DTUN_HUB]);
   if (data[IFLA_DTUN_HUB_PORT])
@@ -860,7 +1024,7 @@ static int dtun_newlink(struct net *net, struct net_device *dev,
     return err;
   }
   list_add_rcu(&d->global_list, &dtun_devices);
-  schedule_delayed_work(&d->probe_work, msecs_to_jiffies(d->probe_interval_ms));
+  schedule_delayed_work(&d->probe_work, 0);
   return 0;
 }
 

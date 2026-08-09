@@ -33,10 +33,6 @@ void dtun_config_init(dtun_config_t *config) {
   config->interface = strdup_safe("dtun0");
   config->local_outer_ip = strdup_safe("0.0.0.0");
   config->data_port = 49000;
-  config->probe_interval_ms = 1000;
-  config->path_timeout_ms = 3000;
-  config->refresh_interval_ms = 1000;
-  config->fast_recovery = 1;
   config->raw_transport = 1;
   config->node_id = 0;
   config->address = strdup_safe("0.0.0.0/24");
@@ -52,13 +48,11 @@ void dtun_config_init(dtun_config_t *config) {
   config->pool_configured = 0;
   config->state_file = strdup_safe("/var/lib/dtun/hub.state");
   config->cookie_seconds = 30;
-  config->peer_timeout = 60;
   config->identity_retention = 86400;
 
   config->hub_address = NULL;
   config->hub_port = 49001;
   config->local_port = 0;
-  config->interval = 20;
   config->timeout = 5;
   config->once = 0;
   config->spoke_state_file = strdup_safe("/var/lib/dtun/spoke-ha.state");
@@ -74,7 +68,6 @@ void dtun_config_init(dtun_config_t *config) {
   config->ha_bootstrap_address = NULL;
   config->ha_port = DTUN_HA_PORT;
   config->ha_weight = 1000;
-  config->failover_timeout = DTUN_HA_FAILOVER_TIMEOUT;
   config->failback = strdup_safe("immediate");
   config->recovery_stable_time = 120;
   config->min_backup_active_time = 300;
@@ -127,17 +120,20 @@ static void apply_value(dtun_config_t *c, const char *section, const char *key,
     c->field = atoi(val);                                                      \
     return;                                                                    \
   }
+  static const char *const obsolete[] = {
+      "probe_interval_ms", "path_timeout_ms", "refresh_interval_ms",
+      "interval",          "peer_timeout",    "failover_timeout",
+      "fast_recovery"};
+
+  for (size_t i = 0; i < sizeof(obsolete) / sizeof(obsolete[0]); i++)
+    if (!strcmp(key, obsolete[i])) {
+      snprintf(c->obsolete_key, sizeof(c->obsolete_key), "%s", key);
+      return;
+    }
   STRING_VALUE("mode", mode)
   STRING_VALUE("interface", interface)
   STRING_VALUE("local_outer_ip", local_outer_ip)
   INT_VALUE("data_port", data_port)
-  INT_VALUE("probe_interval_ms", probe_interval_ms)
-  INT_VALUE("path_timeout_ms", path_timeout_ms)
-  INT_VALUE("refresh_interval_ms", refresh_interval_ms)
-  if (!strcmp(key, "fast_recovery")) {
-    c->fast_recovery = !strcmp(val, "true") || !strcmp(val, "1");
-    return;
-  }
   if (!strcmp(key, "raw_transport")) {
     c->raw_transport = strcmp(val, "false") && strcmp(val, "0");
     return;
@@ -164,13 +160,11 @@ static void apply_value(dtun_config_t *c, const char *section, const char *key,
   }
   STRING_VALUE("state_file", state_file)
   INT_VALUE("cookie_seconds", cookie_seconds)
-  INT_VALUE("peer_timeout", peer_timeout)
   INT_VALUE("identity_retention", identity_retention)
   STRING_VALUE("hub_address", hub_address)
   STRING_VALUE("spoke_state_file", spoke_state_file)
   INT_VALUE("hub_port", hub_port)
   INT_VALUE("local_port", local_port)
-  INT_VALUE("interval", interval)
   INT_VALUE("timeout", timeout)
   if (!strcmp(key, "once")) {
     c->once = !strcmp(val, "true") || !strcmp(val, "1");
@@ -197,7 +191,6 @@ static void apply_value(dtun_config_t *c, const char *section, const char *key,
   STRING_VALUE("bootstrap_address", ha_bootstrap_address)
   INT_VALUE("ha_port", ha_port)
   INT_VALUE("weight", ha_weight)
-  INT_VALUE("failover_timeout", failover_timeout)
   STRING_VALUE("failback", failback)
   INT_VALUE("recovery_stable_time", recovery_stable_time)
   INT_VALUE("min_backup_active_time", min_backup_active_time)
@@ -248,6 +241,13 @@ static int parse_file(dtun_config_t *config, const char *filepath) {
     char *val = trim_whitespace(eq + 1);
 
     apply_value(config, section, key, val);
+    if (config->obsolete_key[0]) {
+      fprintf(stderr,
+              "%s: configuration key '%s' was removed; adaptive liveness is "
+              "always enabled\n",
+              filepath, config->obsolete_key);
+      config->obsolete_key[0] = '\0';
+    }
   }
   fclose(fp);
   return 0;
@@ -301,7 +301,8 @@ int dtun_config_load(dtun_config_t *config, const char *filepath) {
       free(overlay);
       return -1;
     }
-  } else if (!config->ha_config && strcmp(filepath, DTUN_HA_CONFIG_PATH)) {
+  } else if (!config->ha_config && strcmp(filepath, DTUN_HA_CONFIG_PATH) &&
+             (!config->mode || strcmp(config->mode, "spoke"))) {
     FILE *probe = fopen(DTUN_HA_CONFIG_PATH, "r");
     if (probe) {
       fclose(probe);

@@ -82,9 +82,6 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `interface` | `dtun0` | daemon 创建和管理的接口名 |
 | `local_outer_ip` | `0.0.0.0` | 本机外层 IPv4；为 0 时按每条外层路由自动选择源地址 |
 | `data_port` | `49000` | 本地数据面 UDP 端口 |
-| `probe_interval_ms` | `1000` | Raw/UDP 路径探测间隔 |
-| `path_timeout_ms` | `3000` | 活跃路径失效时间；不得小于两倍探测间隔 |
-| `fast_recovery` | `true` | 启用出口变化快速恢复；Spoke 必须绑定 `0.0.0.0` |
 | `node_id` | `0` | Hub 必须使用 1（0 会回退为 1）；Spoke 中 0 请求临时自动分配，1 被保留 |
 | `address` | `0.0.0.0/24` | 内层 IPv4/CIDR；Spoke 地址为 0 时请求池内动态分配 |
 | `psk` | 无 | 32 字节 PSK 的 64 位十六进制表示；省略仅供不安全测试 |
@@ -102,7 +99,6 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `pool` | 从 Hub `address` 的网络前缀推导 | Spoke 内层地址池，当前只接受 `/0` 至 `/30`；显式配置时以 `pool` 为准 |
 | `state_file` | `/var/lib/dtun/hub.state` | 带版本的二进制持久化状态 |
 | `cookie_seconds` | `30` | cookie 时间桶秒数；非正数回退为 30 |
-| `peer_timeout` | `60` | 最后一次成功注册后保留 Spoke 的秒数；非正数回退为 60 |
 | `identity_retention` | `86400` | 离线节点地址及 tunnel/session ID 保留秒数 |
 
 ### `[spoke]`
@@ -112,8 +108,6 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | `hub_address` | 无 | 必填，Hub 控制面的 IPv4 地址 |
 | `hub_port` | `49001` | Hub 控制端口，不是数据端口 |
 | `local_port` | `0` | 注册控制 socket 的本地源端口；0 表示临时端口 |
-| `interval` | `20` | 每次注册尝试后的重试/刷新间隔；非正数按 1 秒处理 |
-| `refresh_interval_ms` | `1000` | 已注册会话的 DTRG 轻量刷新间隔 |
 | `timeout` | `5` | 每个控制响应的接收超时；非正数回退为 5 秒 |
 | `once` | `false` | 首次尝试后退出；成功时保留接口，失败时返回非零 |
 | `spoke_state_file` | `/var/lib/dtun/spoke-ha.state` | 持久化动态发现的 Hub 列表、权重和最高任期 |
@@ -124,7 +118,6 @@ INI 段名用于组织配置；当前解析器按键名读取，下表中的段�
 | --- | --- | --- |
 | `ha_config` | `/etc/dtun/ha/ha.conf` | 仅在使用非默认路径时指定生成的 HA 配置片段 |
 | `ha_port` | `49001` | Hub 间认证、复制和选举TCP端口；可与Spoke控制面UDP端口复用端口号 |
-| `failover_timeout` | `3` | 活动 Hub连续不可达后开始接管的秒数；回切防抖由独立稳定窗口控制 |
 | `failback` | `immediate` | `immediate` 在稳定门槛后回主；`sticky` 保持当前 Hub |
 | `recovery_stable_time` | `120` | 原主 Hub连续健康观察时间 |
 | `min_backup_active_time` | `300` | 备 Hub接管后的最短驻留时间 |
@@ -225,9 +218,10 @@ daemon 认为 `interface` 完全归自己管理；创建前会删除同名现有
 
 ## 6.1 部署高可用 Hub
 
-最小部署为一主一备。两节点中主 Hub超时后唯一备 Hub直接接管；三个及以上正式
-Hub 使用多数派选举，权重高的同步候选优先。两节点没有外部见证，因此网络分区时
-可能短暂双主，Spoke 通过持久化任期收敛。
+最小部署为一主一备。两节点中唯一备 Hub经过多个独立 EWMA/RTTVAR 探测轮次确认
+主 Hub离线后直接接管；三个及以上 Hub使用多数派选举，权重高的同步候选优先。
+两节点采用可用性优先策略，网络分区时可能短暂双主，恢复通信后通过认证的最高
+任期收敛。
 
 主 Hub 初始化：
 
@@ -279,7 +273,8 @@ dtunctl ha failback
 ```
 
 新增地址、node ID 和 tunnel/session ID 只有同步到备机（多节点时为多数派）后才
-确认。备机失联期间已有链路继续工作，但不会确认新的持久分配。
+确认。direct-pair 隔离期间已有链路和已有身份重连继续工作，但在调用分配器前拒绝
+全新地址或 node ID，避免产生无法同步的持久状态。
 
 ## 7. 直连、Hub 转发与回退
 
@@ -295,16 +290,16 @@ Hub 仅在 `peer-get` 显示另一个 Spoke 的认证 UDP 候选为有效时，�
 `SYNC`。接收方为其安装独立双向 tunnel ID 和 `/32`；后续有效 SYNC 中消失的项会
 被删除。周期注册让老节点最终获得新节点信息。
 
-Hub 每秒检查一次注册租约。Spoke 超过 `peer_timeout` 未完成有效注册时，Hub 删除其
-内核 peer、持久化节点和所有相关直连 session；仍在线的其他 Spoke 会在下一次周期
-注册返回的 SYNC 中发现该节点消失并删除直连 peer。通常清理传播时间不超过
-`peer_timeout + interval`，应把 `peer_timeout` 配置为明显大于 Spoke 的 `interval`
-（建议至少三倍），避免短暂抖动导致误回收。
+路径探测周期、离线阈值和故障加速探测由自适应 EWMA/RTTVAR 状态机计算，不提供
+`probe_interval_ms`、`path_timeout_ms`、`peer_timeout`、`interval`、
+`refresh_interval_ms` 或 `failover_timeout` 配置键。旧键会打印兼容性警告并被忽略。
+Hub 只在多个独立探测轮次失败且超过动态阈值后移除活跃内核路径；地址和
+tunnel/session ID 仍按 `identity_retention` 保留，重连可复用原身份。
 
 内核发送路径的实际顺序是：
 
 ```text
-3 秒内完成往返验证的 Raw 候选 → 3 秒内收到过认证帧的直连 UDP 端点 → 使用 Hub peer 重新封装并转发
+自适应阈值内完成往返验证的 Raw 候选 → 自适应阈值内收到过认证帧的直连 UDP 端点 → 使用 Hub peer 重新封装并转发
 ```
 
 Hub 同步的 rendezvous 地址只用于打洞；只有直接收到认证包后才设置 `udp_up`。

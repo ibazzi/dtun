@@ -30,6 +30,15 @@ tests/ha-real/run.sh \
   root@<BACKUP2_IP>
 ```
 
+The two-Hub availability-first direct-pair suite uses only a primary and one
+backup:
+
+```sh
+tests/ha-real/run-direct-pair.sh \
+  root@<PRIMARY_IP> \
+  root@<BACKUP_IP>
+```
+
 SSH and local sudo request passwords directly from the terminal with echo
 disabled.  The scripts deliberately have no password option and do not use an
 inventory file.  SSH multiplexing means each host normally prompts only once.
@@ -58,6 +67,11 @@ The fixed test sequence verifies:
 7. member recovery without immediate preferred-primary preemption;
 8. failure of backup 1 and election of the highest-weight available primary;
 9. convergence of the recovered member.
+
+The direct-pair sequence separately verifies two-member mode discovery, full
+state replication, existing-Spoke forwarding, primary failure with a hard
+2,000 ms data-plane migration limit, rejection of brand-new allocations while
+the pair is isolated, and higher-term convergence when the primary recovers.
 
 `raw_transport = false` is intentional in these cloud test templates.  It
 forces authenticated UDP Hub paths and UDP/direct-or-Hub Spoke paths, avoiding

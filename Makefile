@@ -13,7 +13,7 @@ LDFLAGS ?=
 override LDFLAGS += -lcrypto
 
 BUILD_DIR = build
-CTL_OBJS = $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
+CTL_OBJS = $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_netlink.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(BUILD_DIR)/ctl/dtun_ha_replication.o $(BUILD_DIR)/ctl/dtun_ha_election.o
 CTL_HEADERS = $(wildcard src/ctl/*.h)
 HA_TOOL_HEADERS = $(wildcard tools/dtund_ha*.h tools/dtund_spoke_ha.h tools/dtunctl_ha.h)
 SRC_FILES = $(shell find src tools tests iproute2 -type f \( -name "*.c" -o -name "*.h" \))
@@ -72,17 +72,21 @@ $(BUILD_DIR)/test_ha_state: tests/test_ha_state.c $(BUILD_DIR)/ctl/dtun_ha_state
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/test_ha_runtime: tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o
+$(BUILD_DIR)/test_ha_runtime: tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) tests/test_ha_runtime.c tools/dtund_ha.c $(BUILD_DIR)/ctl/dtun_log.o $(BUILD_DIR)/ctl/ini_parser.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/test_ha_join: tests/test_ha_join.c $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_ha_state.o $(BUILD_DIR)/ctl/dtun_ha_proto.o $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/test_spoke_ha: tests/test_spoke_ha.c tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_ha_state.o
+$(BUILD_DIR)/test_spoke_ha: tests/test_spoke_ha.c tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $< tools/dtund_spoke_ha.c $(BUILD_DIR)/ctl/dtun_proto.o $(BUILD_DIR)/ctl/dtun_liveness.o $(BUILD_DIR)/ctl/dtun_ha_state.o $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/test_liveness: tests/test_liveness.c $(BUILD_DIR)/ctl/dtun_liveness.o
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(BUILD_DIR)/ctl/dtun_liveness.o -o $@
 
 clean:
 	@if [ -d "$(BUILD_DIR)" ]; then \
@@ -90,13 +94,14 @@ clean:
 	fi
 	rm -rf $(BUILD_DIR)
 
-check: check-format ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR)/test_ha_state $(BUILD_DIR)/test_ha_runtime $(BUILD_DIR)/test_ha_join $(BUILD_DIR)/test_spoke_ha
+check: check-format ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_state $(BUILD_DIR)/test_ha_state $(BUILD_DIR)/test_ha_runtime $(BUILD_DIR)/test_ha_join $(BUILD_DIR)/test_spoke_ha $(BUILD_DIR)/test_liveness
 	./$(BUILD_DIR)/test_proto
 	./$(BUILD_DIR)/test_daemon_state
 	./$(BUILD_DIR)/test_ha_state
 	./$(BUILD_DIR)/test_ha_runtime
 	./$(BUILD_DIR)/test_ha_join
 	./$(BUILD_DIR)/test_spoke_ha
+	./$(BUILD_DIR)/test_liveness
 	CTL=./$(BUILD_DIR)/dtunctl sh tests/test_cli.sh
 	CTL=./$(BUILD_DIR)/dtunctl sh tests/test_ha_cli.sh
 	sh -n tests/netns-smoke.sh tests/p2mp-netns.sh tests/cdaemon/lib.sh
@@ -104,7 +109,7 @@ check: check-format ctools $(BUILD_DIR)/test_proto $(BUILD_DIR)/test_daemon_stat
 		tests/cdaemon/03-stability.sh tests/cdaemon/04-perf.sh \
 		tests/cdaemon/05-real-internet.sh tests/cdaemon/run-all.sh \
 		tests/ha-real/run.sh tests/ha-real/cleanup.sh \
-		tests/ha-real/node-netns.sh
+		tests/ha-real/node-netns.sh tests/ha-real/run-direct-pair.sh
 
 deb: ctools
 	./debian/rules binary

@@ -81,7 +81,7 @@ daemon 不订阅该事件，而是在生成 SYNC 前调用 `PEER_GET` 获取最�
 全 peer 泛洪；没有 peer 时同样丢包。每份副本使用对应 peer 独立的 tunnel ID、序列号、
 HMAC 和路径选择。
 
-默认每 1 秒的 workqueue 对每个 peer：
+自适应 workqueue 按各路径的 EWMA/RTTVAR 探测周期对每个 peer：
 
 - 有 Raw 地址时发送 Raw PROBE；
 - 有 UDP `IP:port` 时发送 UDP PROBE；
@@ -89,8 +89,8 @@ HMAC 和路径选择。
 
 DATA 的实际选择规则为：
 
-1. 最近 3 秒内完成认证往返的 Raw 地址；
-2. 最近 3 秒内直接观察到认证来源的 UDP 地址；
+1. 在动态阈值内完成认证往返的 Raw 地址；
+2. 在动态阈值内直接观察到认证来源的 UDP 地址；
 3. 否则改用节点 1 的 Hub peer 重新封装，Hub 按内层路由继续转发。
 
 Raw 和直连 UDP 都必须处于活跃窗口。两者失效时使用 Hub peer 的 tunnel ID 和 HMAC
@@ -153,9 +153,10 @@ Hub 本地状态带 magic 和格式校验，持久化 cookie 密钥、下一个 
 最多 128 个节点记录及所有已分配 spoke-pair 会话。每个 Hub↔Spoke 和每个 Spoke 对
 都有独立的双向 tunnel ID，分配从 100 开始并持久化。
 
-Hub 根据有效 CONFIRM/REFRESH 更新 `last_seen`。超过 `peer_timeout` 后只移除活跃
-内核路径并标记离线，地址和 tunnel/session ID 默认继续保留 86400 秒；保留期内相同
-node ID 重连会复用原会话。保留期结束后删除记录并通过 tombstone 传播。
+Hub 根据有效 CONFIRM/REFRESH 更新自适应链路状态。多个独立探测轮次失败并超过
+EWMA/RTTVAR 动态阈值后，只移除活跃内核路径并标记离线；地址和 tunnel/session ID
+默认继续保留 86400 秒，保留期内相同 node ID 重连会复用原会话。保留期结束后删除
+记录并通过 tombstone 传播。
 Hub 每次启动都会轮换持久化 lease token；收到旧 token 的认证 REFRESH 时返回
 `RE_REGISTER` 标志，但不返回新 token。Spoke 随即完成完整注册，并在这个经过认证的
 daemon 生命周期边界重建 Hub peer 和防重放窗口。普通出口候选变化不会重置序列号。
@@ -174,8 +175,8 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - Hub 启动时读取并验证状态，创建接口；正常信号退出时删除接口。
 - Spoke 首次有效 ACK 后创建接口和 Hub peer；其本地 UDP 端口来自自身 `data_port`，
   Hub 目的数据端口来自 ACK。
-- 常驻 Spoke 每秒 REFRESH；失败时保留现有接口。Hub 重启时认证 `RE_REGISTER` 回复
-  跳过额外超时等待，完整注册复用持久化身份和 session。分配地址、node、前缀或 Hub
+- 常驻 Spoke 按自适应周期 REFRESH；失败时保留现有接口。Hub 重启时认证
+  `RE_REGISTER` 回复立即触发完整注册并复用持久化身份和 session。分配地址、node、前缀或 Hub
   数据端口变化时，接口可能被重建。
 - `once=true` 在第一次尝试后退出：成功则保留接口，失败则返回非零且不保留接口。
 - SIGINT、SIGTERM 和 SIGHUP 都表示停止；当前没有配置热重载。
@@ -192,7 +193,7 @@ Hub 在为某个 Spoke 构造 SYNC 时，只发布其他节点中 `PEER_GET` 显
 - DTRG 仍在开发中，只支持相同源码版本构建的 C Hub/Spoke；协议调整时必须同步部署
   替换全部控制面节点。
 - Hub 状态是带版本的本地二进制结构，不保证跨 ABI/架构可移植。
-- Hub 没有显式注销消息；掉线清理由注册租约超时驱动，通知随其他 Spoke 的周期 SYNC
-  传播。
+- Hub 没有显式注销消息；多个独立探测失败并超过动态阈值后执行掉线清理，通知随其他
+  Spoke 的周期 SYNC 传播。
 - `dtunctl peer-list` 通过 Generic Netlink dump 枚举 peer；预留的 `STATS_GET` 尚未实现。
 - 隧道没有拥塞控制、PMTU 发现、分片重组策略或生产级密钥管理。

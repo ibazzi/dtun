@@ -22,6 +22,8 @@ static const struct nla_policy dtun_nl_policy[DTUN_A_MAX + 1] = {
     [DTUN_A_RENDEZVOUS_UDP_PORT] = {.type = NLA_U16},
     [DTUN_A_HUB_ADDR] = {.type = NLA_BINARY, .len = sizeof(__be32)},
     [DTUN_A_HUB_PORT] = {.type = NLA_U16},
+    [DTUN_A_HUB_TERM] = {.type = NLA_U64},
+    [DTUN_A_OPERATIONAL] = {.type = NLA_U8},
 };
 
 struct dtun_peer_status_snapshot {
@@ -40,6 +42,18 @@ struct dtun_peer_status_snapshot {
   u8 raw_up;
   u8 udp_up;
   u8 selected_path;
+  u8 raw_health;
+  u8 udp_health;
+  u64 raw_srtt_us;
+  u64 udp_srtt_us;
+  u64 raw_rttvar_us;
+  u64 udp_rttvar_us;
+  u32 raw_loss_ppm;
+  u32 udp_loss_ppm;
+  u32 raw_threshold_ms;
+  u32 udp_threshold_ms;
+  u32 raw_last_ack_ms;
+  u32 udp_last_ack_ms;
 };
 
 static struct dtun_dev *dtun_nl_dev(struct genl_info *info) {
@@ -101,6 +115,8 @@ static int dtun_nl_peer_add(struct sk_buff *skb, struct genl_info *info) {
     peer->remote_tunnel_id = nla_get_u32(info->attrs[DTUN_A_REMOTE_TUNNEL_ID]);
   INIT_LIST_HEAD(&peer->prefixes);
   spin_lock_init(&peer->state_lock);
+  dtun_path_health_init(&peer->raw_health);
+  dtun_path_health_init(&peer->udp_health);
   if (info->attrs[DTUN_A_KEY]) {
     err = dtun_peer_set_key(peer, nla_data(info->attrs[DTUN_A_KEY]),
                             nla_len(info->attrs[DTUN_A_KEY]));
@@ -166,9 +182,9 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
       peer->candidate_generation = generation;
       peer->direct_udp_addr = 0;
       peer->direct_udp_port = 0;
-      peer->udp_seen = 0;
       peer->raw_validated_addr = 0;
-      peer->raw_seen = 0;
+      dtun_path_health_init(&peer->udp_health);
+      dtun_path_health_init(&peer->raw_health);
     }
   }
   if (info->attrs[DTUN_A_REMOTE_TUNNEL_ID])
@@ -179,7 +195,7 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
     if (raw_addr != peer->raw_addr)
       peer->raw_validated_addr = 0;
     if (raw_addr != peer->raw_addr)
-      peer->raw_seen = 0;
+      dtun_path_health_init(&peer->raw_health);
     peer->raw_addr = raw_addr;
   }
   if (accept_candidates &&
@@ -191,7 +207,7 @@ static int dtun_nl_peer_set(struct sk_buff *skb, struct genl_info *info) {
     if (info->attrs[DTUN_A_UDP_PORT])
       udp_port = nla_get_be16(info->attrs[DTUN_A_UDP_PORT]);
     if (udp_addr != peer->udp_addr || udp_port != peer->udp_port)
-      peer->udp_seen = 0;
+      dtun_path_health_init(&peer->udp_health);
     peer->udp_addr = udp_addr;
     peer->udp_port = udp_port;
   }
@@ -260,7 +276,6 @@ static int dtun_nl_route_del(struct sk_buff *skb, struct genl_info *info) {
 
 static void dtun_snapshot_peer(struct dtun_dev *d, struct dtun_peer *peer,
                                struct dtun_peer_status_snapshot *status) {
-  unsigned long timeout = msecs_to_jiffies(d->path_timeout_ms);
   bool hub_available = false;
 
   memset(status, 0, sizeof(*status));
@@ -277,10 +292,30 @@ static void dtun_snapshot_peer(struct dtun_dev *d, struct dtun_peer *peer,
   status->direct_udp_addr = peer->direct_udp_addr;
   status->direct_udp_port = peer->direct_udp_port;
   status->dynamic_raw = peer->dynamic_raw;
-  status->raw_up = peer->raw_validated_addr &&
-                   time_before(jiffies, peer->raw_seen + timeout);
+  dtun_path_tick(peer, &peer->raw_health);
+  dtun_path_tick(peer, &peer->udp_health);
+  status->raw_up =
+      peer->raw_validated_addr && dtun_path_available(&peer->raw_health);
   status->udp_up = peer->direct_udp_addr && peer->direct_udp_port &&
-                   time_before(jiffies, peer->udp_seen + timeout);
+                   dtun_path_available(&peer->udp_health);
+  status->raw_health = peer->raw_health.state;
+  status->udp_health = peer->udp_health.state;
+  status->raw_srtt_us = peer->raw_health.srtt_us;
+  status->udp_srtt_us = peer->udp_health.srtt_us;
+  status->raw_rttvar_us = peer->raw_health.rttvar_us;
+  status->udp_rttvar_us = peer->udp_health.rttvar_us;
+  status->raw_loss_ppm = dtun_path_loss_ppm(&peer->raw_health);
+  status->udp_loss_ppm = dtun_path_loss_ppm(&peer->udp_health);
+  status->raw_threshold_ms = dtun_path_offline_ms(peer, &peer->raw_health);
+  status->udp_threshold_ms = dtun_path_offline_ms(peer, &peer->udp_health);
+  status->raw_last_ack_ms =
+      peer->raw_health.initialized
+          ? jiffies_to_msecs(jiffies - peer->raw_health.last_ack)
+          : U32_MAX;
+  status->udp_last_ack_ms =
+      peer->udp_health.initialized
+          ? jiffies_to_msecs(jiffies - peer->udp_health.last_ack)
+          : U32_MAX;
   spin_unlock_bh(&peer->state_lock);
 
   if (status->raw_up)
@@ -288,14 +323,17 @@ static void dtun_snapshot_peer(struct dtun_dev *d, struct dtun_peer *peer,
   else if (status->udp_up)
     status->selected_path = DTUN_PATH_UDP;
   else if (status->node_id == 1 && status->rendezvous_udp_addr &&
-           status->rendezvous_udp_port)
+           status->rendezvous_udp_port &&
+           status->udp_health != DTUN_HEALTH_OFFLINE)
     status->selected_path = DTUN_PATH_UDP;
   else {
     struct dtun_peer *hub = dtun_peer_by_node(d, 1);
     if (hub) {
       spin_lock_bh(&hub->state_lock);
       hub_available =
-          hub->raw_validated_addr || (hub->udp_addr && hub->udp_port);
+          hub->raw_validated_addr ||
+          ((hub->direct_udp_addr || hub->udp_addr) && hub->udp_port &&
+           hub->udp_health.state != DTUN_HEALTH_OFFLINE);
       spin_unlock_bh(&hub->state_lock);
     }
     status->selected_path =
@@ -333,7 +371,23 @@ static int dtun_put_peer_status(struct sk_buff *skb, u32 portid, u32 seq,
       nla_put_be16(skb, DTUN_A_DIRECT_UDP_PORT, status->direct_udp_port) ||
       nla_put_u8(skb, DTUN_A_RAW_UP, status->raw_up) ||
       nla_put_u8(skb, DTUN_A_UDP_UP, status->udp_up) ||
-      nla_put_u8(skb, DTUN_A_SELECTED_PATH, status->selected_path)) {
+      nla_put_u8(skb, DTUN_A_SELECTED_PATH, status->selected_path) ||
+      nla_put_u8(skb, DTUN_A_RAW_HEALTH, status->raw_health) ||
+      nla_put_u8(skb, DTUN_A_UDP_HEALTH, status->udp_health) ||
+      nla_put_u64_64bit(skb, DTUN_A_RAW_SRTT_US, status->raw_srtt_us,
+                        DTUN_A_UNSPEC) ||
+      nla_put_u64_64bit(skb, DTUN_A_UDP_SRTT_US, status->udp_srtt_us,
+                        DTUN_A_UNSPEC) ||
+      nla_put_u64_64bit(skb, DTUN_A_RAW_RTTVAR_US, status->raw_rttvar_us,
+                        DTUN_A_UNSPEC) ||
+      nla_put_u64_64bit(skb, DTUN_A_UDP_RTTVAR_US, status->udp_rttvar_us,
+                        DTUN_A_UNSPEC) ||
+      nla_put_u32(skb, DTUN_A_RAW_LOSS_PPM, status->raw_loss_ppm) ||
+      nla_put_u32(skb, DTUN_A_UDP_LOSS_PPM, status->udp_loss_ppm) ||
+      nla_put_u32(skb, DTUN_A_RAW_THRESHOLD_MS, status->raw_threshold_ms) ||
+      nla_put_u32(skb, DTUN_A_UDP_THRESHOLD_MS, status->udp_threshold_ms) ||
+      nla_put_u32(skb, DTUN_A_RAW_LAST_ACK_MS, status->raw_last_ack_ms) ||
+      nla_put_u32(skb, DTUN_A_UDP_LAST_ACK_MS, status->udp_last_ack_ms)) {
     genlmsg_cancel(skb, hdr);
     return -EMSGSIZE;
   }
@@ -457,8 +511,8 @@ static int dtun_nl_rebind(struct sk_buff *skb, struct genl_info *info) {
   list_for_each_entry(peer, &d->peers, list) {
     spin_lock_bh(&peer->state_lock);
     if (peer->dynamic_raw) {
-      peer->raw_seen = 0;
       peer->raw_validated_addr = 0;
+      dtun_path_health_init(&peer->raw_health);
     }
     spin_unlock_bh(&peer->state_lock);
   }
@@ -491,6 +545,81 @@ static int dtun_nl_hub_set(struct sk_buff *skb, struct genl_info *info) {
   d->hub_port = port;
   spin_unlock_bh(&d->hub_lock);
   mod_delayed_work(system_wq, &d->probe_work, 0);
+  rtnl_unlock();
+  return 0;
+}
+
+static int dtun_nl_hub_migrate(struct sk_buff *skb, struct genl_info *info) {
+  struct dtun_dev *d;
+  struct dtun_peer *hub;
+  __be32 address;
+  __be16 port;
+  u64 term;
+
+  (void)skb;
+  if (!info->attrs[DTUN_A_HUB_ADDR] || !info->attrs[DTUN_A_HUB_PORT] ||
+      !info->attrs[DTUN_A_HUB_TERM])
+    return -EINVAL;
+  memcpy(&address, nla_data(info->attrs[DTUN_A_HUB_ADDR]), sizeof(address));
+  port = nla_get_be16(info->attrs[DTUN_A_HUB_PORT]);
+  term = nla_get_u64(info->attrs[DTUN_A_HUB_TERM]);
+  if (!address || !port || !term)
+    return -EINVAL;
+
+  rtnl_lock();
+  d = dtun_nl_dev(info);
+  if (!d) {
+    rtnl_unlock();
+    return -ENODEV;
+  }
+  spin_lock_bh(&d->hub_lock);
+  if (term < d->hub_term) {
+    spin_unlock_bh(&d->hub_lock);
+    rtnl_unlock();
+    return -ESTALE;
+  }
+  d->hub_addr = address;
+  d->hub_port = port;
+  d->hub_term = term;
+  spin_unlock_bh(&d->hub_lock);
+
+  hub = dtun_peer_by_node(d, 1);
+  if (!hub) {
+    rtnl_unlock();
+    return -ENOENT;
+  }
+  spin_lock_bh(&hub->state_lock);
+  hub->udp_addr = address;
+  hub->udp_port = port;
+  hub->direct_udp_addr = 0;
+  hub->direct_udp_port = 0;
+  hub->raw_validated_addr = 0;
+  atomic64_set(&hub->tx_seq, 0);
+  hub->rx_highest = 0;
+  memset(hub->rx_window, 0, sizeof(hub->rx_window));
+  dtun_path_health_init(&hub->raw_health);
+  dtun_path_health_init(&hub->udp_health);
+  spin_unlock_bh(&hub->state_lock);
+  mod_delayed_work(system_wq, &d->probe_work, 0);
+  rtnl_unlock();
+  return 0;
+}
+
+static int dtun_nl_role_set(struct sk_buff *skb, struct genl_info *info) {
+  struct dtun_dev *d;
+
+  (void)skb;
+  if (!info->attrs[DTUN_A_OPERATIONAL])
+    return -EINVAL;
+  rtnl_lock();
+  d = dtun_nl_dev(info);
+  if (!d) {
+    rtnl_unlock();
+    return -ENODEV;
+  }
+  WRITE_ONCE(d->operational, !!nla_get_u8(info->attrs[DTUN_A_OPERATIONAL]));
+  if (d->operational)
+    mod_delayed_work(system_wq, &d->probe_work, 0);
   rtnl_unlock();
   return 0;
 }
@@ -534,6 +663,14 @@ static const struct genl_ops dtun_genl_ops[] = {
      .flags = GENL_ADMIN_PERM,
      .policy = dtun_nl_policy,
      .doit = dtun_nl_hub_set},
+    {.cmd = DTUN_CMD_HUB_MIGRATE,
+     .flags = GENL_ADMIN_PERM,
+     .policy = dtun_nl_policy,
+     .doit = dtun_nl_hub_migrate},
+    {.cmd = DTUN_CMD_ROLE_SET,
+     .flags = GENL_ADMIN_PERM,
+     .policy = dtun_nl_policy,
+     .doit = dtun_nl_role_set},
 };
 
 static const struct genl_multicast_group dtun_genl_groups[] = {

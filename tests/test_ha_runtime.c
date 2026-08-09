@@ -27,21 +27,23 @@ int main(void) {
   strcpy(s.local_hub_id, "backup");
   strcpy(s.leader_id, "primary");
   s.term = 4;
-  s.member_count = 2;
+  s.member_count = 3;
   member(&s, 0, "primary", 1000);
   member(&s, 1, "backup", 900);
-  CHECK(dtund_ha_runtime_init(&r, &c, &s, 100) == 0 &&
+  member(&s, 2, "backup-b", 800);
+  CHECK(dtund_ha_runtime_init(&r, &c, &s, 100000) == 0 &&
         r.phase == DTUND_HA_STANDBY);
-  CHECK(c.failover_timeout == 3 && c.raw_transport == 1);
-  CHECK(!dtund_ha_tick(&r, 102));
-  CHECK(dtund_ha_tick(&r, 103));
+  CHECK(c.raw_transport == 1);
+  dtund_ha_note_heartbeat(&r, "backup-b", 4, 10, 100800);
+  CHECK(!dtund_ha_tick(&r, 100899));
+  CHECK(dtund_ha_tick(&r, 100900));
   CHECK(r.phase == DTUND_HA_BACKUP_HOLDDOWN && r.persistent.term == 5 &&
         dtund_ha_is_active(&r));
-  CHECK(!dtund_ha_tick(&r, 402));
-  CHECK(dtund_ha_tick(&r, 403) && r.phase == DTUND_HA_RECOVERY_OBSERVING);
+  CHECK(!dtund_ha_tick(&r, 400899));
+  CHECK(dtund_ha_tick(&r, 400900) && r.phase == DTUND_HA_RECOVERY_OBSERVING);
   for (int i = 0; i <= 120; i++)
-    dtund_ha_note_probe(&r, 1, 404 + i);
-  CHECK(dtund_ha_tick(&r, 524) && r.phase == DTUND_HA_FAILBACK_PREPARE);
+    dtund_ha_note_probe(&r, 1, 401000 + (uint64_t)i * 1000);
+  CHECK(dtund_ha_tick(&r, 521000) && r.phase == DTUND_HA_FAILBACK_PREPARE);
 
   memset(&s, 0, sizeof(s));
   strcpy(s.local_hub_id, "backup-b");
@@ -51,9 +53,21 @@ int main(void) {
   member(&s, 0, "primary", 1000);
   member(&s, 1, "backup-a", 800);
   member(&s, 2, "backup-b", 900);
-  CHECK(dtund_ha_runtime_init(&r, &c, &s, 1000) == 0);
-  dtund_ha_note_heartbeat(&r, "backup-a", 1, 10, 1002);
-  CHECK(dtund_ha_tick(&r, 1003) && !strcmp(r.persistent.leader_id, "backup-b"));
+  CHECK(dtund_ha_runtime_init(&r, &c, &s, 1000000) == 0);
+  dtund_ha_note_heartbeat(&r, "backup-a", 1, 10, 1000200);
+  CHECK(dtund_ha_tick(&r, 1000900) &&
+        !strcmp(r.persistent.leader_id, "backup-b"));
+
+  memset(&s, 0, sizeof(s));
+  strcpy(s.local_hub_id, "backup");
+  strcpy(s.leader_id, "primary");
+  s.term = 7;
+  s.member_count = 2;
+  member(&s, 0, "primary", 1000);
+  member(&s, 1, "backup", 900);
+  CHECK(dtund_ha_runtime_init(&r, &c, &s, 2000000) == 0);
+  CHECK(dtund_ha_tick(&r, 2000900) && r.persistent.term == 8 &&
+        !strcmp(r.persistent.leader_id, "backup"));
   dtun_config_free(&c);
   puts("HA runtime state-machine tests passed");
   return 0;

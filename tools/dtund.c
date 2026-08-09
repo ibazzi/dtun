@@ -16,6 +16,7 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,7 +101,13 @@ typedef struct {
   int seen;
 } applied_peer_t;
 
+typedef struct {
+  dtun_liveness_t liveness;
+  uint64_t last_arrival_ms;
+} hub_node_health_t;
+
 static hub_state_t g_hub_state;
+static hub_node_health_t g_hub_node_health[MAX_PEERS];
 
 #define HUB_CHANGE_LOG_SIZE 512
 typedef struct {
@@ -348,6 +355,7 @@ static int make_parent_dirs(const char *path) {
 static void hub_state_init(void) {
   memset(&g_hub_state, 0, sizeof(g_hub_state));
   memset(g_hub_changes, 0, sizeof(g_hub_changes));
+  memset(g_hub_node_health, 0, sizeof(g_hub_node_health));
   g_hub_change_head = 0;
   g_hub_change_count = 0;
   g_hub_state_dirty = 0;
@@ -438,6 +446,16 @@ static int hub_load_state(const char *path) {
       g_hub_state.next_node_id < 2) {
     dtun_log_err("Hub state contains invalid counters");
     return -1;
+  }
+  for (uint32_t i = 0; i < g_hub_state.node_count; i++) {
+    uint64_t now_ms = dtun_monotonic_ms();
+
+    dtun_liveness_init(&g_hub_node_health[i].liveness, DTUN_LIVENESS_DIRECT,
+                       now_ms);
+    g_hub_node_health[i].last_arrival_ms = now_ms;
+    if (g_hub_state.nodes[i].online)
+      dtun_liveness_note_success(&g_hub_node_health[i].liveness, 100000,
+                                 now_ms);
   }
   return 0;
 }
@@ -626,6 +644,25 @@ static hub_node_record_t *node_by_id(uint64_t node_id) {
   return NULL;
 }
 
+static void hub_node_seen(hub_node_record_t *node) {
+  ptrdiff_t index;
+  uint64_t now_ms, interval_us;
+
+  if (!node)
+    return;
+  index = node - g_hub_state.nodes;
+  if (index < 0 || index >= MAX_PEERS)
+    return;
+  now_ms = dtun_monotonic_ms();
+  interval_us = g_hub_node_health[index].last_arrival_ms &&
+                        now_ms > g_hub_node_health[index].last_arrival_ms
+                    ? (now_ms - g_hub_node_health[index].last_arrival_ms) * 1000
+                    : 100000;
+  dtun_liveness_note_success(&g_hub_node_health[index].liveness, interval_us,
+                             now_ms);
+  g_hub_node_health[index].last_arrival_ms = now_ms;
+}
+
 static uint32_t allocate_tunnel_id(void) {
   uint32_t value = g_hub_state.next_tunnel_id++;
   if (!value)
@@ -710,13 +747,18 @@ hub_allocate_node(const dtun_config_t *config, struct in_addr hub_address,
       return NULL;
     }
   }
-  existing = &g_hub_state.nodes[g_hub_state.node_count++];
+  existing = &g_hub_state.nodes[g_hub_state.node_count];
   memset(existing, 0, sizeof(*existing));
   existing->node_id = requested_node;
   existing->tunnel_id = allocate_tunnel_id();
   existing->hub_tunnel_id = allocate_tunnel_id();
   existing->address = final_address;
   existing->prefix_len = pool_prefix;
+  dtun_liveness_init(&g_hub_node_health[g_hub_state.node_count].liveness,
+                     DTUN_LIVENESS_DIRECT, dtun_monotonic_ms());
+  g_hub_node_health[g_hub_state.node_count].last_arrival_ms =
+      dtun_monotonic_ms();
+  g_hub_state.node_count++;
   return existing;
 }
 
@@ -743,15 +785,6 @@ static hub_session_record_t *hub_session(uint64_t node_id, uint64_t other_id) {
   return session;
 }
 
-static int hub_node_expired(const hub_node_record_t *node, time_t now,
-                            int timeout) {
-  if (timeout <= 0)
-    timeout = 60;
-  if (node->last_seen > 0 && now < node->last_seen)
-    return 0;
-  return node->last_seen <= 0 || now - node->last_seen > timeout;
-}
-
 static void hub_remove_node_at(uint32_t index) {
   uint64_t node_id = g_hub_state.nodes[index].node_id;
   uint32_t i;
@@ -773,14 +806,20 @@ static void hub_remove_node_at(uint32_t index) {
     memmove(&g_hub_state.nodes[index], &g_hub_state.nodes[index + 1],
             (size_t)(g_hub_state.node_count - index - 1) *
                 sizeof(g_hub_state.nodes[0]));
+  if (index + 1 < g_hub_state.node_count)
+    memmove(&g_hub_node_health[index], &g_hub_node_health[index + 1],
+            (size_t)(g_hub_state.node_count - index - 1) *
+                sizeof(g_hub_node_health[0]));
   g_hub_state.node_count--;
   memset(&g_hub_state.nodes[g_hub_state.node_count], 0,
          sizeof(g_hub_state.nodes[0]));
+  memset(&g_hub_node_health[g_hub_state.node_count], 0,
+         sizeof(g_hub_node_health[0]));
 }
 
 static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
   time_t now = time(NULL);
-  int timeout = config->peer_timeout > 0 ? config->peer_timeout : 60;
+  uint64_t now_ms = dtun_monotonic_ms();
   int retention =
       config->identity_retention > 0 ? config->identity_retention : 86400;
   uint32_t i = 0;
@@ -805,7 +844,21 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
       i++;
       continue;
     }
-    if (!hub_node_expired(node, now, timeout)) {
+    uint32_t offline_ms =
+        dtun_liveness_offline_ms(&g_hub_node_health[i].liveness);
+    uint64_t age_ms = now_ms >= g_hub_node_health[i].liveness.last_ack_ms
+                          ? now_ms - g_hub_node_health[i].liveness.last_ack_ms
+                          : 0;
+
+    if (age_ms < offline_ms) {
+      i++;
+      continue;
+    }
+    while (g_hub_node_health[i].liveness.failed_rounds <
+           dtun_liveness_miss_budget(&g_hub_node_health[i].liveness))
+      dtun_liveness_note_miss(&g_hub_node_health[i].liveness, now_ms);
+    if (dtun_liveness_tick(&g_hub_node_health[i].liveness, now_ms) !=
+        DTUN_LIVENESS_OFFLINE) {
       i++;
       continue;
     }
@@ -833,8 +886,8 @@ static int hub_expire_nodes(const dtun_config_t *config, uint32_t ifindex) {
 
       inet_ntop(AF_INET, &address, text, sizeof(text));
       printf("[dtund Hub] Marked Spoke NodeID=%llu InnerIP=%s offline "
-             "after %ds\n",
-             (unsigned long long)node_id, text, timeout);
+             "after adaptive threshold %ums\n",
+             (unsigned long long)node_id, text, offline_ms);
       fflush(stdout);
     }
     i++;
@@ -1024,11 +1077,14 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
   int created_ifindex;
   int sock;
   struct sockaddr_in bind_address;
-  struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+  struct timeval timeout = {.tv_sec = 0, .tv_usec = 100000};
   uint8_t rx[DTRG_MAX_PACKET], tx[DTRG_MAX_PACKET];
   int demoted = 0;
   time_t ha_active_since = time(NULL);
   int ha_backoff_reset = 0;
+  uint64_t quorum_missing_since_ms = 0;
+  uint64_t leader_term = 1;
+  char leader_id[DTRG_HUB_ID_LEN] = "standalone";
 
   if (inet_pton(AF_INET, config->local_outer_ip, &outer_address) != 1 ||
       parse_cidr(config->address, &inner_address, &prefix_len) < 0) {
@@ -1038,12 +1094,20 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
   if (hub_load_state(config->state_file) < 0 ||
       hub_validate_state(config, inner_address) < 0)
     return 1;
+  if (config->ha_enabled) {
+    dtun_ha_state_t state;
+
+    if (dtun_ha_state_load(config->ha_state_file, &state) < 0)
+      return 1;
+    leader_term = state.term;
+    snprintf(leader_id, sizeof(leader_id), "%s", state.local_hub_id);
+  }
   /* A daemon restart also rebuilds every kernel peer and therefore resets
    * data-plane transmit sequences.  Rotate persisted leases so connected
    * Spokes cannot silently continue REFRESH with replay windows from the
    * previous Hub lifecycle; the subsequent authenticated registration
    * recreates both ends of each peer. */
-  if (g_hub_state.node_count) {
+  if (g_hub_state.node_count && !config->ha_enabled) {
     uint32_t i;
     for (i = 0; i < g_hub_state.node_count; i++) {
       if (RAND_bytes(g_hub_state.nodes[i].lease_token,
@@ -1059,10 +1123,9 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
     return 1;
   if (dtun_module_ensure_loaded() < 0)
     return 1;
-  created_ifindex = dtun_link_create(
-      config->interface, outer_address, data_port,
-      config->node_id ? config->node_id : 1, no_hub, 0,
-      (uint32_t)config->probe_interval_ms, (uint32_t)config->path_timeout_ms);
+  created_ifindex =
+      dtun_link_create(config->interface, outer_address, data_port,
+                       config->node_id ? config->node_id : 1, no_hub, 0);
   if (created_ifindex <= 0) {
     dtun_log_err("Failed to create Hub interface %s: %s", config->interface,
                  strerror(-created_ifindex));
@@ -1166,6 +1229,48 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         demoted = 1;
         break;
       }
+      if (state_loaded && !strcmp(state.leader_id, state.local_hub_id)) {
+        uint32_t voters = 0;
+        uint64_t now_ms = dtun_monotonic_ms();
+
+        for (uint32_t i = 0; i < state.member_count; i++)
+          if (state.members[i].enabled &&
+              state.members[i].role == DTUN_HA_VOTER)
+            voters++;
+        if (voters >= 3 &&
+            !dtund_ha_service_has_quorum(g_ha_service, state.term, now_ms)) {
+          if (!quorum_missing_since_ms)
+            quorum_missing_since_ms = now_ms;
+          if (now_ms - quorum_missing_since_ms >= 800) {
+            dtun_ha_member_t *target = NULL;
+
+            for (uint32_t i = 0; i < state.member_count; i++) {
+              dtun_ha_member_t *m = &state.members[i];
+
+              if (!m->enabled || m->role != DTUN_HA_VOTER ||
+                  !strcmp(m->hub_id, state.local_hub_id))
+                continue;
+              if (!target || m->weight > target->weight ||
+                  (m->weight == target->weight &&
+                   strcmp(m->hub_id, target->hub_id) < 0))
+                target = m;
+            }
+            if (target) {
+              snprintf(state.leader_id, sizeof(state.leader_id), "%s",
+                       target->hub_id);
+              state.commit_index++;
+              (void)dtun_ha_state_save(config->ha_state_file, &state);
+            }
+            (void)dtun_nl_role_set(ifindex, 0);
+            dtun_log_warn("[dtund HA] Leader lost quorum for 800ms; local Hub "
+                          "self-fenced");
+            demoted = 1;
+            break;
+          }
+        } else {
+          quorum_missing_since_ms = 0;
+        }
+      }
       if (state_loaded && !ha_backoff_reset && config->ha_role &&
           !strcmp(config->ha_role, "primary") && state.failback_level &&
           time(NULL) - ha_active_since >= config->failback_backoff_reset_time) {
@@ -1213,9 +1318,19 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
               : (message.address.s_addr ? node_by_address(message.address)
                                         : NULL);
       int allocation_is_new = (existing_record == NULL);
-      hub_node_record_t *record = hub_allocate_node(
-          config, inner_address, message.node_id, message.address,
-          message.prefix_len, allocation_error, sizeof(allocation_error));
+      hub_node_record_t *record;
+
+      if (config->ha_enabled && allocation_is_new &&
+          !dtund_ha_service_allocation_allowed(g_ha_service, leader_term,
+                                               dtun_monotonic_ms())) {
+        dtun_log_warn("[dtund HA] Rejected new allocation while direct-pair "
+                      "peer is unavailable");
+        dtrg_msg_free(&message);
+        continue;
+      }
+      record = hub_allocate_node(config, inner_address, message.node_id,
+                                 message.address, message.prefix_len,
+                                 allocation_error, sizeof(allocation_error));
 
       if (!record) {
         fprintf(stderr, "[dtund Hub] Rejected registration: %s\n",
@@ -1236,6 +1351,7 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
         record->online = 1;
         record->offline_since = 0;
         record->last_seen = time(NULL);
+        hub_node_seen(record);
         record->refresh_counter = 0;
         if (RAND_bytes(record->lease_token, sizeof(record->lease_token)) != 1) {
           dtrg_msg_free(&message);
@@ -1293,10 +1409,11 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
           continue;
         }
         g_hub_state_dirty = 0;
-        packed = dtrg_pack_ack(
-            psk, record->node_id, record->tunnel_id, record->hub_tunnel_id,
-            record->address, record->prefix_len, data_port, message.nonce,
-            record->lease_token, g_hub_state.candidate_epoch, tx, sizeof(tx));
+        packed = dtrg_pack_ack(psk, record->node_id, record->tunnel_id,
+                               record->hub_tunnel_id, record->address,
+                               record->prefix_len, data_port, message.nonce,
+                               record->lease_token, g_hub_state.candidate_epoch,
+                               leader_term, leader_id, tx, sizeof(tx));
         if (packed > 0)
           (void)sendto(sock, tx, (size_t)packed, 0, (struct sockaddr *)&source,
                        source_len);
@@ -1348,11 +1465,11 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
          * authenticated flag tells a legitimate Spoke to perform the
          * full handshake immediately without disclosing the Hub's
          * newly rotated lease token. */
-        packed =
-            dtrg_pack_refresh_ack(psk, message.node_id, message.lease_token,
-                                  message.counter, g_hub_state.candidate_epoch,
-                                  no_address, 0, DTRG_REFRESH_RE_REGISTER, 0,
-                                  NULL, 0, refresh_tx, sizeof(refresh_tx));
+        packed = dtrg_pack_refresh_ack(
+            psk, message.node_id, message.lease_token, message.counter,
+            g_hub_state.candidate_epoch, no_address, 0,
+            DTRG_REFRESH_RE_REGISTER, 0, leader_term, leader_id, data_port,
+            NULL, 0, refresh_tx, sizeof(refresh_tx));
         if (packed > 0)
           (void)sendto(sock, refresh_tx, (size_t)packed, 0,
                        (struct sockaddr *)&source, source_len);
@@ -1363,14 +1480,18 @@ static int run_hub(dtun_config_t *config, const uint8_t psk[32], int has_psk) {
       if (message.offset == 0)
         record->refresh_counter = message.counter;
       record->last_seen = time(NULL);
+      hub_node_seen(record);
       candidates_changed = refresh_hub_candidates(ifindex);
       memset(page, 0, sizeof(page));
       count = build_refresh_page(record->node_id, message.epoch, message.offset,
                                  page, &flags, &next_offset);
+      if (config->ha_enabled)
+        flags |= DTRG_REFRESH_HUB_SWITCH;
       packed = dtrg_pack_refresh_ack(
           psk, record->node_id, record->lease_token, message.counter,
           g_hub_state.candidate_epoch, record->udp_addr, record->udp_port,
-          flags, next_offset, page, count, refresh_tx, sizeof(refresh_tx));
+          flags, next_offset, leader_term, leader_id, data_port, page, count,
+          refresh_tx, sizeof(refresh_tx));
       if (packed > 0)
         (void)sendto(sock, refresh_tx, (size_t)packed, 0,
                      (struct sockaddr *)&source, source_len);
@@ -1547,29 +1668,26 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
   uint16_t applied_count = 0;
   uint8_t lease_token[DTRG_LEASE_TOKEN_LEN] = {0};
   uint64_t refresh_epoch = 0, refresh_counter = 0;
+  uint64_t applied_hub_term = 0;
   int have_lease = 0, refresh_failures = 0;
   int registered_once = 0;
   int result = 1;
   dtund_spoke_ha_t spoke_ha;
 
   memset(applied, 0, sizeof(applied));
-  dtund_spoke_ha_init(&spoke_ha, time(NULL));
+  dtund_spoke_ha_init(&spoke_ha, dtun_monotonic_ms());
   if (config->spoke_state_file)
-    (void)dtund_spoke_ha_load(&spoke_ha, config->spoke_state_file, time(NULL));
+    (void)dtund_spoke_ha_load(&spoke_ha, config->spoke_state_file,
+                              dtun_monotonic_ms());
   if (!config->hub_address ||
       inet_pton(AF_INET, config->hub_address, &hub_control.sin_addr) != 1 ||
       parse_cidr(config->address, &requested_address, &requested_prefix) < 0) {
     dtun_log_err("Invalid Spoke Hub or inner address");
     return 1;
   }
-  if (config->fast_recovery && strcmp(config->local_outer_ip, "0.0.0.0")) {
+  if (strcmp(config->local_outer_ip, "0.0.0.0")) {
     fprintf(stderr,
-            "fast_recovery requires local_outer_ip=0.0.0.0 on a Spoke\n");
-    return 1;
-  }
-  if (config->probe_interval_ms < 100 || config->path_timeout_ms < 500 ||
-      config->path_timeout_ms < 2 * config->probe_interval_ms) {
-    dtun_log_err("invalid probe/path timeout configuration");
+            "adaptive recovery requires local_outer_ip=0.0.0.0 on a Spoke\n");
     return 1;
   }
   sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -1586,8 +1704,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
   }
   hub_control.sin_family = AF_INET;
   hub_control.sin_port = htons((uint16_t)config->hub_port);
-  timeout.tv_sec =
-      config->fast_recovery ? 1 : (config->timeout > 0 ? config->timeout : 5);
+  timeout.tv_sec = config->timeout > 0 ? config->timeout : 5;
   timeout.tv_usec = 0;
   (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   route_fd = open_route_monitor();
@@ -1616,6 +1733,16 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
       int refresh_ok = 1;
       int snapshot = 0;
       int force_register = 0;
+      uint64_t refresh_started_us = 0;
+      uint64_t refresh_rtt_us = 0;
+
+      timeout.tv_sec = 0;
+      timeout.tv_usec =
+          (suseconds_t)(dtun_liveness_rto_ms(&spoke_ha.leader_health) * 1000);
+      if (timeout.tv_usec > 250000)
+        timeout.tv_usec = 250000;
+      (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                       sizeof(timeout));
 
       refresh_counter++;
       if (!refresh_counter)
@@ -1625,6 +1752,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
         ssize_t refresh_length, refresh_packed;
 
         memset(&refresh_reply, 0, sizeof(refresh_reply));
+        refresh_started_us = dtun_monotonic_us();
         refresh_packed =
             dtrg_pack_refresh(psk, assigned_node, lease_token, refresh_counter,
                               refresh_epoch, offset, tx, sizeof(tx));
@@ -1650,8 +1778,8 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
            * datagram. */
           if (refresh_reply.kind == DTRG_HUB_LIST &&
               refresh_reply.node_id == assigned_node) {
-            if (dtund_spoke_ha_update(&spoke_ha, &refresh_reply, time(NULL)) ==
-                    0 &&
+            if (dtund_spoke_ha_update(&spoke_ha, &refresh_reply,
+                                      dtun_monotonic_ms()) == 0 &&
                 config->spoke_state_file)
               (void)dtund_spoke_ha_save(&spoke_ha, config->spoke_state_file);
             dtrg_msg_free(&refresh_reply);
@@ -1666,6 +1794,12 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
             dtrg_msg_free(&refresh_reply);
             refresh_ok = 0;
           }
+          if (refresh_reply.kind == DTRG_REFRESH_ACK && refresh_started_us) {
+            uint64_t now_us = dtun_monotonic_us();
+
+            refresh_rtt_us =
+                now_us > refresh_started_us ? now_us - refresh_started_us : 1;
+          }
           break;
         }
         if (!refresh_ok)
@@ -1675,6 +1809,26 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
           refresh_ok = 0;
           dtrg_msg_free(&refresh_reply);
           break;
+        }
+        if (refresh_reply.term < applied_hub_term) {
+          dtrg_msg_free(&refresh_reply);
+          refresh_ok = 0;
+          break;
+        }
+        if ((refresh_reply.flags & DTRG_REFRESH_HUB_SWITCH) &&
+            refresh_reply.term > applied_hub_term) {
+          if (!refresh_reply.data_port ||
+              dtun_nl_hub_migrate(ifindex, hub_control.sin_addr,
+                                  refresh_reply.data_port,
+                                  refresh_reply.term) < 0) {
+            dtrg_msg_free(&refresh_reply);
+            refresh_ok = 0;
+            break;
+          }
+          hub_data_port = refresh_reply.data_port;
+          applied_hub_term = refresh_reply.term;
+          dtun_log_info("[dtund Spoke] Fast-migrated Hub peer to term %llu",
+                        (unsigned long long)applied_hub_term);
         }
         if ((refresh_reply.flags & DTRG_REFRESH_SNAPSHOT) && offset == 0) {
           uint16_t k;
@@ -1725,25 +1879,39 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
             dtrg_parse(psk, rx, (size_t)hub_length, &hub_update) == 0 &&
             hub_update.kind == DTRG_HUB_LIST &&
             hub_update.node_id == assigned_node)
-          if (dtund_spoke_ha_update(&spoke_ha, &hub_update, time(NULL)) == 0 &&
+          if (dtund_spoke_ha_update(&spoke_ha, &hub_update,
+                                    dtun_monotonic_ms()) == 0 &&
               config->spoke_state_file)
             (void)dtund_spoke_ha_save(&spoke_ha, config->spoke_state_file);
         dtrg_msg_free(&hub_update);
         refresh_failures = 0;
-        dtund_spoke_ha_seen(&spoke_ha, time(NULL));
+        dtund_spoke_ha_seen(&spoke_ha, refresh_rtt_us ? refresh_rtt_us : 100000,
+                            dtun_monotonic_ms());
         result = 0;
         if (config->once)
           break;
-        for (int waited = 0; waited < (config->refresh_interval_ms > 0
-                                           ? config->refresh_interval_ms
-                                           : 1000) &&
+        for (int waited = 0; waited < (int)dtun_liveness_probe_interval_ms(
+                                          &spoke_ha.leader_health) &&
                              g_running;
              waited += 100)
           usleep(100000);
         continue;
       }
-      if (!force_register && ++refresh_failures < 2) {
-        sleep(1);
+      dtund_spoke_ha_missed(&spoke_ha, dtun_monotonic_ms());
+      refresh_failures++;
+      if (!force_register && dtund_spoke_ha_failover(&spoke_ha, &hub_control,
+                                                     dtun_monotonic_ms())) {
+        char endpoint[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &hub_control.sin_addr, endpoint, sizeof(endpoint));
+        dtun_log_warn("[dtund Spoke] Leader offline; probing backup Hub %s:%u",
+                      endpoint, ntohs(hub_control.sin_port));
+        refresh_failures = 0;
+        continue;
+      }
+      if (!force_register &&
+          spoke_ha.leader_health.state != DTUN_LIVENESS_OFFLINE) {
+        usleep(100000);
         continue;
       }
       have_lease = 0;
@@ -1751,7 +1919,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
     }
 
     if (!have_lease &&
-        dtund_spoke_ha_failover(&spoke_ha, &hub_control, time(NULL))) {
+        dtund_spoke_ha_failover(&spoke_ha, &hub_control, dtun_monotonic_ms())) {
       char endpoint[INET_ADDRSTRLEN];
       inet_ntop(AF_INET, &hub_control.sin_addr, endpoint, sizeof(endpoint));
       printf("[dtund Spoke] Leader timeout; trying backup Hub %s:%u\n",
@@ -1766,6 +1934,10 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
      * has no valid in-flight response yet, so discard stale control
      * datagrams before creating its new nonce. */
     if (!have_lease) {
+      timeout.tv_sec = config->timeout > 0 ? config->timeout : 5;
+      timeout.tv_usec = 0;
+      (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                       sizeof(timeout));
       for (;;) {
         source_len = sizeof(source);
         length = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT,
@@ -1827,9 +1999,7 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
         dtun_link_delete_by_name(config->interface);
       int created_ifindex =
           dtun_link_create(config->interface, local_outer, local_data_port,
-                           ack.node_id, hub_control.sin_addr, ack.data_port,
-                           (uint32_t)config->probe_interval_ms,
-                           (uint32_t)config->path_timeout_ms);
+                           ack.node_id, hub_control.sin_addr, ack.data_port);
       if (created_ifindex <= 0) {
         dtun_log_err("Failed to create Spoke interface: %s",
                      strerror(-created_ifindex));
@@ -1912,7 +2082,8 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
       if (length > 0 && same_endpoint(&source, &hub_control) &&
           dtrg_parse(psk, rx, (size_t)length, &hub_list) == 0 &&
           hub_list.kind == DTRG_HUB_LIST && hub_list.node_id == ack.node_id) {
-        if (dtund_spoke_ha_update(&spoke_ha, &hub_list, time(NULL)) == 0 &&
+        if (dtund_spoke_ha_update(&spoke_ha, &hub_list, dtun_monotonic_ms()) ==
+                0 &&
             config->spoke_state_file)
           (void)dtund_spoke_ha_save(&spoke_ha, config->spoke_state_file);
       }
@@ -1927,9 +2098,11 @@ static int run_spoke(dtun_config_t *config, const uint8_t psk[32],
     refresh_epoch = 0;
     refresh_counter = 0;
     have_lease = 1;
-    dtund_spoke_ha_seen(&spoke_ha, time(NULL));
+    applied_hub_term = ack.term;
+    dtund_spoke_ha_seen(&spoke_ha, 100000, dtun_monotonic_ms());
     if (ifindex)
-      (void)dtun_nl_hub_set(ifindex, hub_control.sin_addr, ack.data_port);
+      (void)dtun_nl_hub_migrate(ifindex, hub_control.sin_addr, ack.data_port,
+                                ack.term ? ack.term : 1);
     success = 1;
     registered_once = 1;
     result = 0;
@@ -2052,9 +2225,12 @@ int main(int argc, char **argv) {
         goto daemon_done;
       }
       if (strcmp(ha_state.leader_id, ha_state.local_hub_id)) {
-        time_t last_seen = time(NULL);
+        dtun_liveness_t leader_health;
         time_t stable_since = 0;
         int promoted = 0;
+
+        dtun_liveness_init(&leader_health, DTUN_LIVENESS_CRITICAL,
+                           dtun_monotonic_ms());
         dtun_log_info(
             "[dtund HA] Standby Hub '%s' (role=%s) waiting for active "
             "leader '%s' (term %llu)",
@@ -2069,16 +2245,16 @@ int main(int argc, char **argv) {
              * fails, do not wait forever for a cooperative failback:
              * apply the same direct-pair/quorum failover timer. */
             if (step == 0)
-              step = dtund_ha_standby_step(&config, &last_seen);
+              step = dtund_ha_standby_step(&config, &leader_health, ha_service);
           } else
-            step = dtund_ha_standby_step(&config, &last_seen);
+            step = dtund_ha_standby_step(&config, &leader_health, ha_service);
           if (step < 0) {
             result = 1;
             break;
           }
           promoted = step > 0;
           if (!promoted)
-            sleep(1);
+            usleep(100000);
         }
         if (promoted && g_running)
           result = run_hub(&config, psk, has_psk);
