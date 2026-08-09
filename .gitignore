@@ -26,6 +26,9 @@ iperf_output.txt
 
 # Debian build working directory
 /debian/dtun/
+/debian/dtun.postinst
+/debian/dtun.prerm
+/debian/dtun.postrm
 /debian/.debhelper/
 /debian/files
 /debian/debhelper-build-stamp

@@ -1,5 +1,5 @@
 .PHONY: all build module ctools test-binaries clean check test p2mp-test deb \
-	format check-format compat-build
+	format check-format compat-build clean-debian
 
 ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 SRC_DIR := $(ROOT_DIR)/src
@@ -59,6 +59,13 @@ clean:
 	$(MAKE) -C $(SRC_DIR) BUILD_DIR=$(BUILD_DIR) clean
 	rm -f $(LEGACY_KERNEL_ARTIFACTS)
 	rm -rf $(BUILD_DIR)
+	$(MAKE) clean-debian
+
+clean-debian:
+	rm -rf debian/dtun debian/.debhelper
+	rm -f debian/files debian/debhelper-build-stamp \
+		debian/*.substvars debian/*.debhelper.log debian/*.debhelper \
+		debian/dtun.postinst debian/dtun.prerm debian/dtun.postrm
 
 check: check-format ctools test-binaries
 	$(BUILD_DIR)/test_proto

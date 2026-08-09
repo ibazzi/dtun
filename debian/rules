@@ -1,62 +1,49 @@
 #!/usr/bin/make -f
 
+export DEB_RULES_REQUIRES_ROOT := no
+
 %:
 	dh $@ --without dwz,strip
 
 DTUN_VERSION := $(shell dpkg-parsechangelog -S Version | sed 's/-[^-]*$$//')
 DTUN_DKMS_DIR := debian/dtun/usr/src/dtun-$(DTUN_VERSION)
 
-override_dh_testroot:
-
 override_dh_auto_build:
-	make ctools
+	$(MAKE) ctools
 
 override_dh_auto_test:
-	make check
+	$(MAKE) check
 
 override_dh_auto_install:
-	mkdir -p debian/dtun/usr/bin
-	mkdir -p debian/dtun/etc/dtun
-	mkdir -p debian/dtun/lib/systemd/system
-	mkdir -p $(DTUN_DKMS_DIR)/module
-	mkdir -p $(DTUN_DKMS_DIR)/include/dtun
-	cp -f build/dtund debian/dtun/usr/bin/
-	cp -f build/dtunctl debian/dtun/usr/bin/
-	cp -f samples/dtun-example.conf debian/dtun/etc/dtun/dtun-example.conf
-	cp -f debian/dtund.service debian/dtun/lib/systemd/system/dtund.service
+	install -d debian/dtun/usr/bin debian/dtun/etc/dtun \
+		debian/dtun/lib/systemd/system $(DTUN_DKMS_DIR)/module \
+		$(DTUN_DKMS_DIR)/include/dtun
+	install -m 0755 build/dtund build/dtunctl debian/dtun/usr/bin/
+	install -m 0644 samples/dtun-example.conf \
+		debian/dtun/etc/dtun/dtun-example.conf
+	install -m 0644 debian/dtund.service \
+		debian/dtun/lib/systemd/system/dtund.service
 	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/dkms.conf.in > $(DTUN_DKMS_DIR)/dkms.conf
-	cp -f module/Makefile module/Kbuild module/dtun.h module/dtun_main.c \
+	install -m 0644 module/Makefile module/Kbuild module/dtun.h module/dtun_main.c \
 		module/dtun_netlink.c $(DTUN_DKMS_DIR)/module/
-	cp -f include/dtun/uapi.h $(DTUN_DKMS_DIR)/include/dtun/
-
-override_dh_fixperms:
-	chmod -R a+rX debian/dtun
-	chmod 0755 debian/dtun/usr/bin/*
+	install -m 0644 include/dtun/uapi.h $(DTUN_DKMS_DIR)/include/dtun/
 
 override_dh_dwz:
 
 override_dh_strip:
 
 override_dh_installdeb:
-	mkdir -p debian/dtun/DEBIAN
-	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/postinst.in > debian/dtun/DEBIAN/postinst
-	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/prerm.in > debian/dtun/DEBIAN/prerm
-	cp -f debian/postrm debian/dtun/DEBIAN/postrm
-	cp -f debian/conffiles debian/dtun/DEBIAN/conffiles
-	chmod 0755 debian/dtun/DEBIAN/postinst debian/dtun/DEBIAN/prerm debian/dtun/DEBIAN/postrm
-	chmod 0644 debian/dtun/DEBIAN/conffiles
-	chmod -R a+rX debian/dtun
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/postinst.in > debian/dtun.postinst
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/prerm.in > debian/dtun.prerm
+	sed 's/@VERSION@/$(DTUN_VERSION)/g' debian/postrm.in > debian/dtun.postrm
+	dh_installdeb
+	rm -f debian/dtun.postinst debian/dtun.prerm debian/dtun.postrm
 
 override_dh_gencontrol:
-	dpkg-gencontrol -pdtun -Pdebian/dtun
-
-override_dh_md5sums:
-	(cd debian/dtun && find . -type f ! -path './DEBIAN/*' -print0 | xargs -r0 md5sum > DEBIAN/md5sums)
+	dpkg-gencontrol -pdtun -Pdebian/dtun -Tdebian/dtun.substvars
 
 override_dh_builddeb:
-	@mkdir -p build
-	dpkg-deb --build debian/dtun build/
+	dpkg-deb --build --root-owner-group debian/dtun build/
 
 override_dh_auto_clean:
-	make clean || true
-	rm -rf debian/dtun debian/.debhelper debian/files debian/*.debhelper.log debian/*.substvars
+	$(MAKE) clean
